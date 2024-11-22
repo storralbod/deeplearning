@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 # Load the merged data
-data = pd.read_csv('merged_marginal_data.csv')  # Updated to use your saved file
+data = pd.read_csv('/home/teitur/DTU/electricproject/deeplearning/model/merged_marginal_data.csv')  # Updated to use your saved file
 
 # Prepare the input features (using Hour_Sin and Hour_Cos) and the target price
 sequence_length = 24  # Number of past hours to use for prediction
