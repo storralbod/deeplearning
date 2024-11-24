@@ -35,7 +35,7 @@ def create_dataset(data_series, look_back, transforms):
     
     # splitting data into train and test sets
     train = df[:-36]
-    test = df[:-24]
+    test = df[-24:]
     
     # creating target and features for training set
     X_train = train.iloc[:, 1:].values
@@ -94,12 +94,15 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     # creating the training and testing datasets
     X_train, y_train, X_test, y_test, train_dates, test_dates, scaler = create_dataset(data_series, look_back, transforms)
 
+    # unpacking lstm_params
+    units, epochs, verbose = lstm_params
+
     # training the model
     model = Sequential()
-    model.add(LSTM(lstm_params[0], input_shape=(1, look_back)))
+    model.add(LSTM(units, input_shape=(1, look_back)))
     model.add(Dense(1))
     model.compile(loss='mean_squared_error', optimizer='adam')
-    model.fit(X_train, y_train, epochs=lstm_params[1], batch_size=1, verbose=lstm_params[2])
+    model.fit(X_train, y_train, epochs=epochs, batch_size=1, verbose=verbose)
     
     # making predictions
     train_predict = model.predict(X_train)
@@ -144,5 +147,5 @@ def gauss_compare(original_series, predictions):
     try:
         error = np.sqrt(mean_squared_error(predictions, original_series[:-36]))
     except:
-        error = np.sqrt(mean_squared_error(predictions, original_series[:-24]))
+        error = np.sqrt(mean_squared_error(predictions, original_series[-24:]))
     print('Test RMSE: %.3f' % error)
