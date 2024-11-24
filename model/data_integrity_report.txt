@@ -1,6 +1,0 @@
-Data Integrity Report:
-Missing Values: {'Price1': 0, 'Hour_Sin': 0, 'Hour_Cos': 0, 'Day_Sin': 0, 'Day_Cos': 0, 'Month_Sin': 0, 'Month_Cos': 0, 'Year_Scaled': 0, 'temperature_2m': 0, 'precipitation': 0, 'wind_speed_10m': 0, 'cloudcover': 0, 'Gas_Price': 2806}
-Missing Percentages: {'Price1': 0.0, 'Hour_Sin': 0.0, 'Hour_Cos': 0.0, 'Day_Sin': 0.0, 'Day_Cos': 0.0, 'Month_Sin': 0.0, 'Month_Cos': 0.0, 'Year_Scaled': 0.0, 'temperature_2m': 0.0, 'precipitation': 0.0, 'wind_speed_10m': 0.0, 'cloudcover': 0.0, 'Gas_Price': 5.48}
-Total Rows: 51221
-Unique Counts: {'Price1': 13017, 'Hour_Sin': 20, 'Hour_Cos': 21, 'Day_Sin': 31, 'Day_Cos': 25, 'Month_Sin': 11, 'Month_Cos': 11, 'Year_Scaled': 5, 'temperature_2m': 3087, 'precipitation': 211, 'wind_speed_10m': 2216, 'cloudcover': 701, 'Gas_Price': 1176}
-Rows with Missing Values: 2806
