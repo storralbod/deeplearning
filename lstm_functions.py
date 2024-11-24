@@ -115,7 +115,7 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     # plot of predictions and actual values
     fig = plt.figure()
     ax = fig.add_subplot(111)
-    myFmt = mdates.DateFormatter('%m/%y')
+    myFmt = mdates.DateFormatter('%H')
     ax.xaxis.set_major_formatter(myFmt)
     plt.plot(y_test)
     plt.plot(test_predict, color='red')
@@ -134,10 +134,10 @@ def gauss_compare(original_series, predictions):
     # creating a plot of the original series and Gaussian-filtered predictions
     fig = plt.figure()
     ax = fig.add_subplot(111)
-    myFmt = mdates.DateFormatter('%m/%y')
+    myFmt = mdates.DateFormatter('%H')
     ax.xaxis.set_major_formatter(myFmt)
 
-    plt.plot(original_series[:-24])
+    plt.plot(original_series[-24:])
     plt.plot(predictions, color='red')
     plt.title('Gauss-Filtered Predictions vs. Original Series')
     plt.show()
