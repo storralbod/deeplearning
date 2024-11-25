@@ -89,8 +89,26 @@ def inverse_transforms(train_predict, y_train, test_predict, y_test, data_series
     return train_predict, y_train, test_predict, y_test
 
 def lstm_model(data_series, look_back, transforms, lstm_params):
-    np.random.seed(1)
+
+    """
+    Train an LSTM model and predict mean and standard deviations.
     
+    Args:
+    - data_series (pd.Series): Original time series data.
+    - look_back (int): Number of past observations to use for predictions.
+    - transforms (list): Transformations to apply to the data.
+    - lstm_params (tuple): Parameters for LSTM (units, epochs, verbose).
+
+    Returns:
+    - test_mean_series (pd.Series): Predicted mean values (test set).
+    - test_std_series (pd.Series): Predicted standard deviations (test set).
+    - y_test_series (pd.Series): Original test set values (unfiltered).
+    """
+
+    np.random.seed(1)
+    train_predict = []
+    test_predict = []
+
     # creating the training and testing datasets
     X_train, y_train, X_test, y_test, train_dates, test_dates, scaler = create_dataset(data_series, look_back, transforms)
 
@@ -100,7 +118,7 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     # training the model
     model = Sequential()
     model.add(LSTM(units, input_shape=(1, look_back)))
-    model.add(Dense(1))
+    model.add(Dense(2))
     model.compile(loss='mean_squared_error', optimizer='adam')
     model.fit(X_train, y_train, epochs=epochs, batch_size=1, verbose=verbose)
     
@@ -108,44 +126,94 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     train_predict = model.predict(X_train)
     test_predict = model.predict(X_test)
     
-    # inverse transforming results
-    train_predict, y_train, test_predict, y_test = \
-    inverse_transforms(train_predict, y_train, test_predict, y_test, data_series, train_dates, test_dates, scaler, transforms)
-    
-    # plot of predictions and actual values
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    myFmt = mdates.DateFormatter('%H')
-    ax.xaxis.set_major_formatter(myFmt)
-    plt.plot(y_test)
-    plt.plot(test_predict, color='red')
-    plt.show()
-    
-    # calculating RMSE metrics
-    error = np.sqrt(mean_squared_error(train_predict, y_train))
-    print('Train RMSE: %.3f' % error)
-    error = np.sqrt(mean_squared_error(test_predict, y_test))
-    print('Test RMSE: %.3f' % error)
-    
-    return train_predict, y_train, test_predict, y_test
+    # creating separate numpy arrays for mean and standard deviation
+    train_mean = train_predict[:, 0]
+    test_mean = test_predict[:, 0]
+    train_std = train_predict[:, 1]
+    test_std = test_predict[:, 1]
 
-def gauss_compare(original_series, predictions):
+    # Ensure train_mean and train_std are reshaped for inverse_transform
+    train_mean = train_mean.reshape(-1, 1)
+    test_mean = test_mean.reshape(-1, 1)
+    train_std = train_std.reshape(-1, 1)
+    test_std = test_std.reshape(-1, 1)
 
-    # creating a plot of the original series and Gaussian-filtered predictions
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    myFmt = mdates.DateFormatter('%H')
+    # Inverse transform means
+    train_mean_series, y_train_series, test_mean_series, y_test_series = inverse_transforms(
+        train_mean, y_train, test_mean, y_test, data_series, train_dates, test_dates, scaler, transforms
+    )
+
+    # Inverse transform standard deviations
+    train_std_series, _, test_std_series, _ = inverse_transforms(
+        train_std, y_train, test_std, y_test, data_series, train_dates, test_dates, scaler, transforms
+    )
+
+    # Plot predictions with confidence intervals
+    fig, ax = plt.subplots(figsize=(12, 6))
+    myFmt = mdates.DateFormatter('%H:%M')
     ax.xaxis.set_major_formatter(myFmt)
 
-    plt.plot(original_series[-24:])
-    plt.plot(predictions, color='red')
-    plt.title('Gauss-Filtered Predictions vs. Original Series')
+    # Plot actual values
+    plt.plot(y_test_series.index, y_test_series, label="Actual Values", color="blue", alpha=0.7)
+
+    # Plot mean predictions
+    plt.plot(test_mean_series.index, test_mean_series, label="Predicted Mean", color="red", alpha=0.8)
+
+    # Confidence intervals
+    lower_bound = test_mean_series - 1.96 * test_std_series
+    upper_bound = test_mean_series + 1.96 * test_std_series
+    plt.fill_between(test_mean_series.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% CI")
+
+    # Add labels and legend
+    plt.xlabel("Time")
+    plt.ylabel("Values")
+    plt.title("Predictions with Confidence Intervals")
+    plt.legend()
     plt.show()
 
-    # calculating the RMSE between the Gaussian-filtered predictions and original dataset.
-    # the +1 exception code is required when differencing is performed, as the earliest data point can be lost
-    try:
-        error = np.sqrt(mean_squared_error(predictions, original_series[:-36]))
-    except:
-        error = np.sqrt(mean_squared_error(predictions, original_series[-24:]))
+    # Calculate RMSE
+    train_rmse = np.sqrt(mean_squared_error(y_train_series, train_mean_series))
+    test_rmse = np.sqrt(mean_squared_error(y_test_series, test_mean_series))
+    print('Train RMSE: %.3f' % train_rmse)
+    print('Test RMSE: %.3f' % test_rmse)
+    
+    return test_mean_series, test_std_series, y_test_series
+
+def gauss_compare(original_series, predictions_mean, predictions_std):
+    """
+    Compare the original series with Gaussian-filtered predictions.
+    
+    Args:
+    - original_series (pd.Series): The original unfiltered time series data.
+    - predictions_mean (pd.Series): The predicted mean values from the model.
+    - predictions_std (pd.Series): The predicted standard deviations from the model.
+
+    Returns:
+    - None: Displays a plot and prints RMSE.
+    """
+    # Align predictions with the last part of the original series
+    aligned_original = original_series[-24:]
+
+    # Calculate confidence intervals
+    lower_bound = predictions_mean - 1.96 * predictions_std
+    upper_bound = predictions_mean + 1.96 * predictions_std
+
+    # Plot the original series and predictions
+    fig, ax = plt.subplots(figsize=(12, 6))
+    myFmt = mdates.DateFormatter('%H:%M')
+    ax.xaxis.set_major_formatter(myFmt)
+
+    plt.plot(aligned_original.index, aligned_original, label="Original Series", color="blue", alpha=0.7)
+    plt.plot(predictions_mean.index, predictions_mean, label="Predicted Mean", color="red", alpha=0.8)
+    plt.fill_between(
+        predictions_mean.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% Confidence Interval"
+    )
+    plt.title("Gauss-Filtered Predictions vs. Original Series")
+    plt.xlabel("Time")
+    plt.ylabel("Values")
+    plt.legend()
+    plt.show()
+
+    # Calculate RMSE
+    error = np.sqrt(mean_squared_error(aligned_original, predictions_mean))
     print('Test RMSE: %.3f' % error)
