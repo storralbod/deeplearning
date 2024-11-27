@@ -18,7 +18,7 @@ def create_dataset(data_series, look_back, transforms):
     # differencing data, if necessary
     if transforms[1] == True:
         dates = data_series.index
-        data_series = pd.Series(data_series - data_series.shift(1), index=dates).dropna()
+        data_series = pd.Series(data_series - data_series.shift(24), index=dates).dropna()
 
     # scaling values between 0 and 1
     dates = data_series.index
@@ -28,7 +28,8 @@ def create_dataset(data_series, look_back, transforms):
     
     # creating targets and features by shifting values by 'i' number of time periods
     df = pd.DataFrame()
-    for i in range(look_back+1):
+    relevant_times = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 72, 96, 120, 144, 168, 336, 360, 504, 672, 840, 1008, 1344, 2016, 2688, 3360, 4032, 4704, 5376, 6048]
+    for i in relevant_times:
         label = ''.join(['t-', str(i)])
         df[label] = data_series.shift(i)
     df = df.dropna()
@@ -64,19 +65,19 @@ def inverse_transforms(train_predict, y_train, test_predict, y_test, data_series
     
     # reversing differencing if log transformed as well
     if (transforms[1] == True) & (transforms[0] == True):
-        train_predict = pd.Series(train_predict + np.log(data_series.shift(1)), index=train_dates).dropna()
-        y_train = pd.Series(y_train + np.log(data_series.shift(1)), index=train_dates).dropna()
+        train_predict = pd.Series(train_predict + np.log(data_series.shift(24)), index=train_dates).dropna()
+        y_train = pd.Series(y_train + np.log(data_series.shift(24)), index=train_dates).dropna()
 
-        test_predict = pd.Series(test_predict + np.log(data_series.shift(1)), index=test_dates).dropna()
-        y_test = pd.Series(y_test + np.log(data_series.shift(1)), index=test_dates).dropna()
+        test_predict = pd.Series(test_predict + np.log(data_series.shift(24)), index=test_dates).dropna()
+        y_test = pd.Series(y_test + np.log(data_series.shift(24)), index=test_dates).dropna()
     
     # reversing differencing if no log transform
     elif transforms[1] == True:
-        train_predict = pd.Series(train_predict + data_series.shift(1), index=train_dates).dropna()
-        y_train = pd.Series(y_train + data_series.shift(1), index=train_dates).dropna()
+        train_predict = pd.Series(train_predict + data_series.shift(24), index=train_dates).dropna()
+        y_train = pd.Series(y_train + data_series.shift(24), index=train_dates).dropna()
 
-        test_predict = pd.Series(test_predict + data_series.shift(1), index=test_dates).dropna()
-        y_test = pd.Series(y_test + data_series.shift(1), index=test_dates).dropna()
+        test_predict = pd.Series(test_predict + data_series.shift(24), index=test_dates).dropna()
+        y_test = pd.Series(y_test + data_series.shift(24), index=test_dates).dropna()
       
     # reversing log transformation
     if transforms[0] == True:
@@ -138,7 +139,8 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     train_std = train_std.reshape(-1, 1)
     test_std = test_std.reshape(-1, 1)
 
-    # Inverse transform means
+    # inverse transforming the data
+        # Inverse transform means
     train_mean_series, y_train_series, test_mean_series, y_test_series = inverse_transforms(
         train_mean, y_train, test_mean, y_test, data_series, train_dates, test_dates, scaler, transforms
     )
@@ -176,7 +178,9 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     test_rmse = np.sqrt(mean_squared_error(y_test_series, test_mean_series))
     print('Train RMSE: %.3f' % train_rmse)
     print('Test RMSE: %.3f' % test_rmse)
-    
+    results = pd.DataFrame({'actual': y_test_series, 'predicted_mean': test_mean_series, 'predicted_std': test_std_series})
+    print(results)
+
     return test_mean_series, test_std_series, y_test_series
 
 def gauss_compare(original_series, predictions_mean, predictions_std):
