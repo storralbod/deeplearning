@@ -1,0 +1,4 @@
+[ZoneTransfer]
+ZoneId=3
+ReferrerUrl=https://www.omie.es/en/file-access-list?parents%5B0%5D=/&parents%5B1%5D=Continuous%20Intraday%20Market&parents%5B2%5D=1.%20Prices&dir=Maximum%2C%20minimum%20and%20weighted%20price%20for%20each%20hour%20of%20the%20continuous%20intraday%20market&realdir=precios_pibcic
+HostUrl=https://www.omie.es/en/file-download?parents%5B0%5D=precios_pibcic&filename=precios_pibcic_2020.zip
