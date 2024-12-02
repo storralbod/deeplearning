@@ -28,7 +28,7 @@ def create_dataset(data_series, look_back, transforms):
     
     # creating targets and features by shifting values by 'i' number of time periods
     df = pd.DataFrame()
-    relevant_times = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 72, 96, 120, 144, 168, 336, 360, 504, 672, 840, 1008, 1344, 2016, 2688, 3360, 4032, 4704, 5376, 6048]
+    relevant_times = [24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 72, 96, 120, 144, 168, 336] #, 360, 504, 672, 840, 1008, 1344, 2016, 2688, 3360, 4032, 4704, 5376, 6048]
     for i in relevant_times:
         label = ''.join(['t-', str(i)])
         df[label] = data_series.shift(i)
@@ -123,6 +123,9 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     model.compile(loss='mean_squared_error', optimizer='adam')
     model.fit(X_train, y_train, epochs=epochs, batch_size=1, verbose=verbose)
     
+    print(X_train.shape)  # Should be (samples, look_back, 1) for univariate data
+    print(y_train.shape)  # Should match the number of samples
+
     # making predictions
     train_predict = model.predict(X_train)
     test_predict = model.predict(X_test)
@@ -151,37 +154,37 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     )
 
     # Plot predictions with confidence intervals
-    fig, ax = plt.subplots(figsize=(12, 6))
-    myFmt = mdates.DateFormatter('%H:%M')
-    ax.xaxis.set_major_formatter(myFmt)
+    # fig, ax = plt.subplots(figsize=(12, 6))
+    # myFmt = mdates.DateFormatter('%H:%M')
+    # ax.xaxis.set_major_formatter(myFmt)
 
-    # Plot actual values
-    plt.plot(y_test_series.index, y_test_series, label="Actual Values", color="blue", alpha=0.7)
+    # # Plot actual values
+    # plt.plot(y_test_series.index, y_test_series, label="Actual Values", color="blue", alpha=0.7)
 
-    # Plot mean predictions
-    plt.plot(test_mean_series.index, test_mean_series, label="Predicted Mean", color="red", alpha=0.8)
+    # # Plot mean predictions
+    # plt.plot(test_mean_series.index, test_mean_series, label="Predicted Mean", color="red", alpha=0.8)
 
-    # Confidence intervals
-    lower_bound = test_mean_series - 1.96 * test_std_series
-    upper_bound = test_mean_series + 1.96 * test_std_series
-    plt.fill_between(test_mean_series.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% CI")
+    # # Confidence intervals
+    # lower_bound = test_mean_series - 1.96 * test_std_series
+    # upper_bound = test_mean_series + 1.96 * test_std_series
+    # plt.fill_between(test_mean_series.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% CI")
 
-    # Add labels and legend
-    plt.xlabel("Time")
-    plt.ylabel("Values")
-    plt.title("Predictions with Confidence Intervals")
-    plt.legend()
-    plt.show()
+    # # Add labels and legend
+    # plt.xlabel("Time")
+    # plt.ylabel("Values")
+    # plt.title("Predictions with Confidence Intervals")
+    # plt.legend()
+    # plt.show()
 
-    # Calculate RMSE
-    train_rmse = np.sqrt(mean_squared_error(y_train_series, train_mean_series))
+    # # Calculate RMSE
+    # train_rmse = np.sqrt(mean_squared_error(y_train_series, train_mean_series))
     test_rmse = np.sqrt(mean_squared_error(y_test_series, test_mean_series))
-    print('Train RMSE: %.3f' % train_rmse)
-    print('Test RMSE: %.3f' % test_rmse)
-    results = pd.DataFrame({'actual': y_test_series, 'predicted_mean': test_mean_series, 'predicted_std': test_std_series})
-    print(results)
+    # print('Train RMSE: %.3f' % train_rmse)
+    # print('Test RMSE: %.3f' % test_rmse)
+    # results = pd.DataFrame({'actual': y_test_series, 'predicted_mean': test_mean_series, 'predicted_std': test_std_series})
+    # print(results)
 
-    return test_mean_series, test_std_series, y_test_series
+    return test_mean_series, test_std_series, y_test_series, test_rmse
 
 def gauss_compare(original_series, predictions_mean, predictions_std):
     """
@@ -196,11 +199,40 @@ def gauss_compare(original_series, predictions_mean, predictions_std):
     - None: Displays a plot and prints RMSE.
     """
     # Align predictions with the last part of the original series
-    aligned_original = original_series[-24:]
+    aligned_original = original_series[-len(predictions_mean):]
 
     # Calculate confidence intervals
-    lower_bound = predictions_mean - 1.96 * predictions_std
-    upper_bound = predictions_mean + 1.96 * predictions_std
+    # lower_bound = predictions_mean - 1.96 * predictions_std
+    # upper_bound = predictions_mean + 1.96 * predictions_std
+
+    # # Plot the original series and predictions
+    # fig, ax = plt.subplots(figsize=(12, 6))
+    # myFmt = mdates.DateFormatter('%H:%M')
+    # ax.xaxis.set_major_formatter(myFmt)
+
+    # # plt.plot(aligned_original.index, aligned_original, label="Original Series", color="blue", alpha=0.7)
+    # # plt.plot(predictions_mean.index, predictions_mean, label="Predicted Mean", color="red", alpha=0.8)
+    # # plt.fill_between(
+    # #     predictions_mean.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% Confidence Interval"
+    # # )
+    # # plt.title("Gauss-Filtered Predictions vs. Original Series")
+    # # plt.xlabel("Time")
+    # # plt.ylabel("Values")
+    # # plt.legend()
+    # # plt.show()
+
+    # Calculate RMSE
+    error = np.sqrt(mean_squared_error(aligned_original, predictions_mean))
+    print('Test RMSE: %.3f' % error)
+    return error
+
+def plot_results(means, stds, gauss_means, gauss_stds, original_series):
+
+    aligned_original = original_series[-len(gauss_means):]
+
+    # Calculate confidence intervals
+    lower_bound = gauss_means - 1.96 * gauss_stds
+    upper_bound = gauss_means + 1.96 * gauss_stds
 
     # Plot the original series and predictions
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -208,9 +240,9 @@ def gauss_compare(original_series, predictions_mean, predictions_std):
     ax.xaxis.set_major_formatter(myFmt)
 
     plt.plot(aligned_original.index, aligned_original, label="Original Series", color="blue", alpha=0.7)
-    plt.plot(predictions_mean.index, predictions_mean, label="Predicted Mean", color="red", alpha=0.8)
+    plt.plot(gauss_means.index, gauss_means, label="Predicted Mean", color="red", alpha=0.8)
     plt.fill_between(
-        predictions_mean.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% Confidence Interval"
+        gauss_means.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% Confidence Interval"
     )
     plt.title("Gauss-Filtered Predictions vs. Original Series")
     plt.xlabel("Time")
@@ -218,6 +250,31 @@ def gauss_compare(original_series, predictions_mean, predictions_std):
     plt.legend()
     plt.show()
 
+    # Plot predictions with confidence intervals
+    fig, ax = plt.subplots(figsize=(12, 6))
+    myFmt = mdates.DateFormatter('%H:%M')
+    ax.xaxis.set_major_formatter(myFmt)
+
+    # Plot actual values
+    plt.plot(original_series.index, original_series, label="Actual Values", color="blue", alpha=0.7)
+
+    # Plot mean predictions
+    plt.plot(means.index, means, label="Predicted Mean", color="red", alpha=0.8)
+
+    # Confidence intervals
+    lower_bound = means - 1.96 * stds
+    upper_bound = means + 1.96 * stds
+    plt.fill_between(means.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% CI")
+
+    # Add labels and legend
+    plt.xlabel("Time")
+    plt.ylabel("Values")
+    plt.title("Predictions with Confidence Intervals")
+    plt.legend()
+    plt.show()
+
     # Calculate RMSE
-    error = np.sqrt(mean_squared_error(aligned_original, predictions_mean))
-    print('Test RMSE: %.3f' % error)
+    test_rmse = np.sqrt(mean_squared_error(original_series, means))
+    print('Test RMSE: %.3f' % test_rmse)
+    results = pd.DataFrame({'actual': original_series, 'predicted_mean': means, 'predicted_std': stds})
+    print(results)
