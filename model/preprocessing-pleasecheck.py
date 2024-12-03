@@ -118,7 +118,20 @@ def one_hot_encoding(prices,discrete_prices) -> np.array:
 
     return np.array(one_hot_prices)
 
+# log transform of input and output data
+def log_transform(values):
+    values = np.array(values)
+    transformed = np.sign(values) * np.log(np.abs(values) + 1e-10)  # adding a small epsilon to avoid log(0)
+    transformed[values == 0] = 0
+    return transformed
 
+def minmaxscaler(inputs):
+
+  scaler = MinMaxScaler(feature_range=(0,1))
+  scaler.fit(inputs)
+  inputs_scaled = scaler.transform(inputs)
+
+  return scaler,inputs_scaled.ravel()
 
 class Dataset(data.Dataset):
     def __init__(self, inputs, targets):
@@ -201,47 +214,4 @@ def create_difference_datasets():
 
     return training_set_DA, val_set_DA, test_set_DA, training_set_ID, val_set_ID, test_set_ID, training_set_DA_diff_ID, val_set_DA_diff_ID, test_set_DA_diff_ID
 
-def create_dataset_archive(data_series, look_back, transforms):
-    
-    # log transforming that data, if necessary
-    if transforms[0] == True:
-        dates = data_series.index
-        data_series = pd.Series(np.log(data_series), index=dates)
-    
-    # differencing data, if necessary
-    if transforms[1] == True:
-        dates = data_series.index
-        data_series = pd.Series(data_series - data_series.shift(1), index=dates).dropna()
 
-    # scaling values between 0 and 1
-    dates = data_series.index
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data_series.values.reshape(-1, 1))
-    data_series = pd.Series(scaled_data[:, 0], index=dates)
-    
-    # creating targets and features by shifting values by 'i' number of time periods
-    df = pd.DataFrame()
-    for i in range(look_back+1):
-        label = ''.join(['t-', str(i)])
-        df[label] = data_series.shift(i)
-    df = df.dropna()
-    
-    # splitting data into train and test sets
-    train = df[:-24]
-    test = df[-24:]
-    
-    # creating target and features for training set
-    X_train = train.iloc[:, 1:].values
-    y_train = train.iloc[:, 0].values
-    train_dates = train.index
-    
-    # creating target and features for test set
-    X_test = test.iloc[:, 1:].values
-    y_test = test.iloc[:, 0].values
-    test_dates = test.index
-    
-    # reshaping data into 3 dimensions for modeling with the LSTM neural net
-    X_train = np.reshape(X_train, (X_train.shape[0], 1, look_back))
-    X_test = np.reshape(X_test, (X_test.shape[0], 1, look_back))
-    
-    return X_train, y_train, X_test, y_test, train_dates, test_dates, scaler
