@@ -2,9 +2,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import model as m
-from sklearn.metrics import mean_squared_error
-import matplotlib.dates as mdates
 import preprocessing as p
+import matplotlib.dates as mdates
+from sklearn.metrics import mean_squared_error
 
 def inverse_transforms(train_predict, y_train, test_predict, y_test, data_series, train_dates, test_dates, scaler, transforms):
     
@@ -63,7 +63,7 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     test_predict = []
 
     # creating the training and testing datasets
-    X_train, y_train, X_test, y_test, train_dates, test_dates, scaler = p.create_dataset(data_series, look_back, transforms)
+    X_train, y_train, X_test, y_test, train_dates, test_dates, scaler = p.create_dataset_archive(data_series, look_back, transforms)
 
     # unpacking lstm_params
     units, epochs, verbose = lstm_params
