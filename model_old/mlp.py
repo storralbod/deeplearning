@@ -99,3 +99,4 @@ with torch.no_grad():
     test_loss = criterion(test_output, y_test)
 
 print(f"Test Loss: {test_loss.item():.4f}")
+
