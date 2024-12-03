@@ -1,57 +1,10 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from statsmodels.tsa.arima.model import ARIMA
-from keras import Sequential
-from keras._tf_keras.keras.layers import Dense, LSTM
-from sklearn.preprocessing import MinMaxScaler
+import model as m
 from sklearn.metrics import mean_squared_error
 import matplotlib.dates as mdates
-
-def create_dataset(data_series, look_back, transforms):
-    
-    # log transforming that data, if necessary
-    if transforms[0] == True:
-        dates = data_series.index
-        data_series = pd.Series(np.log(data_series), index=dates)
-    
-    # differencing data, if necessary
-    if transforms[1] == True:
-        dates = data_series.index
-        data_series = pd.Series(data_series - data_series.shift(1), index=dates).dropna()
-
-    # scaling values between 0 and 1
-    dates = data_series.index
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data_series.values.reshape(-1, 1))
-    data_series = pd.Series(scaled_data[:, 0], index=dates)
-    
-    # creating targets and features by shifting values by 'i' number of time periods
-    df = pd.DataFrame()
-    for i in range(look_back+1):
-        label = ''.join(['t-', str(i)])
-        df[label] = data_series.shift(i)
-    df = df.dropna()
-    
-    # splitting data into train and test sets
-    train = df[:-36]
-    test = df[-24:]
-    
-    # creating target and features for training set
-    X_train = train.iloc[:, 1:].values
-    y_train = train.iloc[:, 0].values
-    train_dates = train.index
-    
-    # creating target and features for test set
-    X_test = test.iloc[:, 1:].values
-    y_test = test.iloc[:, 0].values
-    test_dates = test.index
-    
-    # reshaping data into 3 dimensions for modeling with the LSTM neural net
-    X_train = np.reshape(X_train, (X_train.shape[0], 1, look_back))
-    X_test = np.reshape(X_test, (X_test.shape[0], 1, look_back))
-    
-    return X_train, y_train, X_test, y_test, train_dates, test_dates, scaler
+import preprocessing as p
 
 def inverse_transforms(train_predict, y_train, test_predict, y_test, data_series, train_dates, test_dates, scaler, transforms):
     
@@ -110,17 +63,13 @@ def lstm_model(data_series, look_back, transforms, lstm_params):
     test_predict = []
 
     # creating the training and testing datasets
-    X_train, y_train, X_test, y_test, train_dates, test_dates, scaler = create_dataset(data_series, look_back, transforms)
+    X_train, y_train, X_test, y_test, train_dates, test_dates, scaler = p.create_dataset(data_series, look_back, transforms)
 
     # unpacking lstm_params
     units, epochs, verbose = lstm_params
 
     # training the model
-    model = Sequential()
-    model.add(LSTM(units, input_shape=(1, look_back)))
-    model.add(Dense(2))
-    model.compile(loss='mean_squared_error', optimizer='adam')
-    model.fit(X_train, y_train, epochs=epochs, batch_size=1, verbose=verbose)
+    model = m.LSTM_multivariate_input_multi_step_forecaster()
     
     # making predictions
     train_predict = model.predict(X_train)
@@ -217,3 +166,22 @@ def gauss_compare(original_series, predictions_mean, predictions_std):
     # Calculate RMSE
     error = np.sqrt(mean_squared_error(aligned_original, predictions_mean))
     print('Test RMSE: %.3f' % error)
+
+def accuracy(forecasts,targets):
+    forecasts = forecasts.numpy()
+    targets = targets.numpy()
+    temp = forecasts*targets/np.abs(forecasts*targets)
+
+    temp[temp==-1]=0 # masking the -1 with 0 because the correct ones are only the value 1
+    accuracy_of_sign  = np.sum(temp)/len(forecasts)
+
+    matches = temp==1
+    mismatches = temp==0
+    diff_values_matches = np.abs(targets[matches] - forecasts[matches])
+    diff_values_mismatches = np.abs(targets[mismatches] - forecasts[mismatches])
+    avg_price_paid_mismatches = np.mean(np.abs(forecasts[mismatches])) # forecasts is the diff between the DA and ID which is what you pay if you don't forecast correctly the sign difference (mismatch)
+    avg_price_recieved_matches = np.mean(np.abs(forecasts[matches])) # forecasts is the diff between the DA and ID which is what you get paid if you do forecast correctly the sign difference (match)
+    std_price_paid_mismatches = np.std(np.abs(forecasts[mismatches]))
+    std_price_recieved_matches = np.std(np.abs(forecasts[matches]))
+
+    return accuracy_of_sign, np.mean(diff_values_matches), np.mean(diff_values_mismatches), avg_price_paid_mismatches,avg_price_recieved_matches, std_price_paid_mismatches, std_price_recieved_matches

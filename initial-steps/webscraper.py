@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 url_da = r'https://www.omie.es/es/file-download?parents%5B0%5D=marginalpdbc&filename=marginalpdbc'
 url_id = r'https://www.omie.es/es/file-download?parents%5B0%5D=precios_pibcic&filename=precios_pibcic'
-download_dir = r"C:\Users\Downloads"
+download_dir = "./raw_data"
 
 exceptions = []
 years = [2023, 2024]
