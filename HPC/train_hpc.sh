@@ -21,12 +21,12 @@
 # Uncomment the desired queue below and its corresponding module loads.
 
 ### ADJUST THIS BASED ON WHAT GPU TO USE
-#BSUB -q gpua100
+#BSUB -q gpua10
 
 
 ### Set the job name
 ### ADD HERE THE NAME OF THE JOB
-#BSUB -J SETJA-INN-NAFN-A-JOB-HéR
+#BSUB -J Teitur-Training
 
 ### Request the number of CPU cores
 # For GPUs with multiple GPUs per node, adjust -n accordingly
@@ -40,7 +40,7 @@
 
 ### Set walltime limit: hh:mm
 # Maximum 24 hours for GPU queues
-#BSUB -W 12:00
+#BSUB -W 1:00
 
 ### Request memory per core
 # Adjust based on your application's requirements
@@ -76,7 +76,7 @@ selected_queues=($(echo "$LSB_QUEUE"))
 # Since LSF directives are processed before the script runs, we need another way
 # to ensure only one queue is selected. We'll count the number of uncommented queues.
 
-þARFT Að BREYTA train_hpc.sh Í ÞaÐ nafn sem ÞÚ gefur Þessu
+# þARFT Að BREYTA train_hpc.sh Í ÞaÐ nafn sem ÞÚ gefur Þessu
 queue_count=$(grep -c '^#BSUB -q ' train_hpc.sh)
 
 if [ "$queue_count" -ne 1 ]; then
@@ -93,9 +93,9 @@ fi
 
 # For gpua100: Tesla A100 PCIE 40 GB & 80 GB
 # If you selected gpua100, uncomment the following lines:
-module load cuda/12.6.2
-module load intel/2024.2.mpi
-module load mpi/5.0.5-gcc-14.2.0-binutils-2.43 
+# module load cuda/12.6.2
+# module load intel/2024.2.mpi
+# module load mpi/5.0.5-gcc-14.2.0-binutils-2.43 
 
 # For gpuv100: Tesla V100 16 GB, 32 GB
 # If you selected gpuv100, uncomment the following lines:
@@ -105,9 +105,9 @@ module load mpi/5.0.5-gcc-14.2.0-binutils-2.43
 
 # For gpua10: Tesla A10 PCIE 24 GB
 # If you selected gpua10, uncomment the following lines:
-# module load cuda/12.6.2
-# module load intel/2024.2.187.mpi
-# module load openmpi/5.0.3-gcc-12.4.0
+module load cuda/12.6.2
+module load intel/2024.2.187.mpi
+module load openmpi/5.0.3-gcc-12.4.0
 
 # For gpua40: Tesla A40 48 GB with NVLink
 # If you selected gpua40, uncomment the following lines:
@@ -126,9 +126,9 @@ module load mpi/5.0.5-gcc-14.2.0-binutils-2.43
 # =============================================================================
 
 
-You need to change this part of the script to match your conda environment
+#You need to change this part of the script to match your conda environment
 # Define variables
-ENV_NAME=""
+ENV_NAME="deeplearn"
 ENV_YML="environment.yml"
 REQUIREMENTS_TXT="requirements.txt"
 MINICONDA_DIR="$HOME/miniconda3"
@@ -244,8 +244,9 @@ echo "=== Starting Training ==="
 # cd /path/to/your/project
 
 # Execute the training script
-Here we use our training script
-python3 train.py
+
+python3 model/Demo.py --data data/trainingdata.csv
+
 
 echo "=== Training Completed ==="
 

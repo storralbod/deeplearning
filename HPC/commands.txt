@@ -1,0 +1,4 @@
+rsync -avz --progress /home/teitur/DTU/electricproject/deeplearning/TrainingData/trainingdata_23_24.csv s242739@transfer.gbar.dtu.dk:~/deeplearn/data/
+
+
+rsync -avz --progress /home/teitur/DTU/electricproject/deeplearning/MODELS/Demo.py s242739@transfer.gbar.dtu.dk:~/deeplearn/model/
