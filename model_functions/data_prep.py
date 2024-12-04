@@ -19,8 +19,6 @@ def create_dataframe():
     print(f"Found {len(marginalpdbc_files)} marginalpdbc files")
     print(f"Found {len(precious_files)} precious files")
 
-
-
     # Process marginalpdbc files
     marginal_data = []
     for file in marginalpdbc_files:
@@ -120,8 +118,9 @@ def one_hot_encoding(prices,discrete_prices) -> np.array:
 
 # log transform of input and output data
 def log_transform(values):
-    values = np.array(values)
-    transformed = np.sign(values) * np.log(np.abs(values) + 1e-10)  # adding a small epsilon to avoid log(0)
+    shifted_values = values + 100  # adding a small epsilon to avoid log(0)
+    shifted_values = np.array(shifted_values)
+    transformed = np.log(np.abs(shifted_values) + 1e-10)  # adding a small epsilon to avoid log(0)
     transformed[values == 0] = 0
     return transformed
 
