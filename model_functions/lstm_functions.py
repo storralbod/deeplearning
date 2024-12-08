@@ -5,6 +5,8 @@ import model as m
 import preprocessing as p
 import matplotlib.dates as mdates
 from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_percentage_error
 
 def inverse_transforms(train_predict, y_train, test_predict, y_test, data_series, train_dates, test_dates, scaler, transforms):
     
@@ -185,3 +187,26 @@ def accuracy(forecasts,targets):
     std_price_recieved_matches = np.std(np.abs(forecasts[matches]))
 
     return accuracy_of_sign, np.mean(diff_values_matches), np.mean(diff_values_mismatches), avg_price_paid_mismatches,avg_price_recieved_matches, std_price_paid_mismatches, std_price_recieved_matches
+
+def cross_validation(n_splits: int, price_data: pd.DataFrame, gammas: list[float], model_params: dict):
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+
+    error_list = []
+
+    for gamma in gammas:
+        errors = []
+
+        for train_index, valid_index in tscv.split(price_data):
+            train, valid = price_data.iloc[train_index], df.iloc[valid_index]
+
+            da_model = m.LSTM_multivariate_input_multi_step_forecaster(model_params["input_size"], 
+                                                                    model_params["hidden_size"],
+                                                                    model_params["num_layers"],
+                                                                    model_params["dropout"],
+                                                                    model_params["past_horizon"],
+                                                                    model_params["forecast_horizon"])
+            forecasts = model.forecast(len(valid))
+            errors.append(mean_absolute_percentage_error(valid["AvgES"], forecasts))
+
+        error_list.append([gamma, sum(errors) / len(errors)])
+
