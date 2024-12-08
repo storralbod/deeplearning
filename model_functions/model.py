@@ -78,8 +78,6 @@ class LaggedPriceDataset(Dataset):
 
         return x_past, y
 
-import torch
-
 # def quantile_loss(y_pred, y_true, quantiles):
 #     """
 #     Compute the quantile loss.
