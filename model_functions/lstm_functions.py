@@ -1,187 +1,152 @@
-import matplotlib.pyplot as plt
-import numpy as np
+import torch
+import copy
 import pandas as pd
-import model as m
-import preprocessing as p
-import matplotlib.dates as mdates
-from sklearn.metrics import mean_squared_error
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
 
-def inverse_transforms(train_predict, y_train, test_predict, y_test, data_series, train_dates, test_dates, scaler, transforms):
+def prepare_data(file_path, lags, temporal_cols, gas_col, da_col, id_col, forecast_horizon):
+    # Load data
+    data = pd.read_csv(file_path)
+    data = data.dropna().reset_index(drop=True)
+    data = data.drop(columns=['Volume_MWh', 'Diff', 'Year', 'Month', 'Day', 'Hour'])
+    # # Create lagged features
+    # for col in [da_col, id_col]:
+    #     for lag in lags:
+    #         data[f'{col}_t-{lag}'] = data[col].shift(lag)
+
+    # for lag in [24, 48]:
+    #     data[f'Price_EUR_MWh_t-{lag}'] = data['Price_EUR_MWh'].shift(lag)
+
+    # Drop rows with NaN values
+    # data = data.dropna().reset_index(drop=True)
+
+    # Train-test split
+    train_size = max(lags)+forecast_horizon+1
+    train_data = data.iloc[:train_size].reset_index(drop=True)
+    test_data = data.iloc[train_size:].reset_index(drop=True)
+
+    # Scaling
+    scale_cols = [da_col, id_col, gas_col]
+    scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in scale_cols}
+
+    for col in scale_cols:
+        train_data[col] = scalers[col].fit_transform(train_data[[col]])
+        test_data[col] = scalers[col].transform(test_data[[col]])
+
+    return train_data, test_data, scalers
+
+# Quantile Loss Function
+def quantile_loss(y, y_hat, quantiles):
+    losses = []
+    for i, q in enumerate(quantiles):
+        errors = y.unsqueeze(1) - y_hat[:, i, :]
+        losses.append(torch.max(q * errors, (q - 1) * errors).mean())
+
+    # Enforce quantile ordering: Q[i] <= Q[i+1]
+    ordering_penalty = 0
+    for i in range(len(quantiles) - 1):
+        ordering_penalty += torch.mean(torch.relu(y_hat[:, i, :] - y_hat[:, i + 1, :]))  # Penalize inversions
+
+    return torch.mean(torch.stack(losses)) + 0.5 * ordering_penalty
+
+# Quantile Diversity Regularization
+def quantile_diversity_loss(y_hat, quantiles):
+    diversity_penalty = 0
+    for i in range(len(quantiles) - 1):
+        diversity_penalty += torch.abs(y_hat[:, i, :] - y_hat[:, i + 1, :]).mean()
+    return 0.01 * diversity_penalty
+
+def temporal_smoothing_loss(y_hat):
+    return torch.mean(torch.abs(y_hat[:, :, 1:] - y_hat[:, :, :-1]))
+
+def train_model(model, train_loader, optimizer, quantiles, device, num_epochs=3, clip_grad=5.0):
     
-    # inverse 0 to 1 scaling
-    train_predict = pd.Series(scaler.inverse_transform(train_predict.reshape(-1,1))[:,0], index=train_dates)
-    y_train = pd.Series(scaler.inverse_transform(y_train.reshape(-1, 1))[:,0], index=train_dates)
+    best_loss = float('inf')
+    best_model_wts = copy.deepcopy(model.state_dict())
 
-    test_predict = pd.Series(scaler.inverse_transform(test_predict.reshape(-1, 1))[:,0], index=test_dates)
-    y_test = pd.Series(scaler.inverse_transform(y_test.reshape(-1, 1))[:,0], index=test_dates)
-    
-    # reversing differencing if log transformed as well
-    if (transforms[1] == True) & (transforms[0] == True):
-        train_predict = pd.Series(train_predict + np.log(data_series.shift(1)), index=train_dates).dropna()
-        y_train = pd.Series(y_train + np.log(data_series.shift(1)), index=train_dates).dropna()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=0.5)
 
-        test_predict = pd.Series(test_predict + np.log(data_series.shift(1)), index=test_dates).dropna()
-        y_test = pd.Series(y_test + np.log(data_series.shift(1)), index=test_dates).dropna()
-    
-    # reversing differencing if no log transform
-    elif transforms[1] == True:
-        train_predict = pd.Series(train_predict + data_series.shift(1), index=train_dates).dropna()
-        y_train = pd.Series(y_train + data_series.shift(1), index=train_dates).dropna()
 
-        test_predict = pd.Series(test_predict + data_series.shift(1), index=test_dates).dropna()
-        y_test = pd.Series(y_test + data_series.shift(1), index=test_dates).dropna()
-      
-    # reversing log transformation
-    if transforms[0] == True:
-        train_predict = pd.Series(np.exp(train_predict), index=train_dates)
-        y_train = pd.Series(np.exp(y_train), index=train_dates)
+    for epoch in range(num_epochs):
+        model.train()
+        epoch_loss = 0.0
 
-        test_predict = pd.Series(np.exp(test_predict), index=test_dates)
-        y_test = pd.Series(np.exp(y_test), index=test_dates)
-        
-    return train_predict, y_train, test_predict, y_test
+        for x_past, x_future, y in train_loader:
+            x_past, x_future, y = x_past.to(device), x_future.to(device), y.to(device)
 
-def lstm_model(data_series, look_back, transforms, lstm_params):
+            optimizer.zero_grad()
 
-    """
-    Train an LSTM model and predict mean and standard deviations.
-    
-    Args:
-    - data_series (pd.Series): Original time series data.
-    - look_back (int): Number of past observations to use for predictions.
-    - transforms (list): Transformations to apply to the data.
-    - lstm_params (tuple): Parameters for LSTM (units, epochs, verbose).
+            # Predictions
+            forecasts = model(x_past)
 
-    Returns:
-    - test_mean_series (pd.Series): Predicted mean values (test set).
-    - test_std_series (pd.Series): Predicted standard deviations (test set).
-    - y_test_series (pd.Series): Original test set values (unfiltered).
-    """
+            # Loss calculation
+            loss = quantile_loss(y, forecasts, quantiles) + 0.01 * quantile_diversity_loss(forecasts, quantiles) + 0.01 * temporal_smoothing_loss(forecasts)
+            loss.backward()
 
-    np.random.seed(1)
-    train_predict = []
-    test_predict = []
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
+            optimizer.step()
 
-    # creating the training and testing datasets
-    X_train, y_train, X_test, y_test, train_dates, test_dates, scaler = p.create_dataset_archive(data_series, look_back, transforms)
+            epoch_loss += loss.item()
 
-    # unpacking lstm_params
-    units, epochs, verbose = lstm_params
+        avg_loss = epoch_loss / len(train_loader)
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
+        scheduler.step(avg_loss)
+        # Save the best model
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            best_model_wts = copy.deepcopy(model.state_dict())
 
-    # training the model
-    model = m.LSTM_multivariate_input_multi_step_forecaster()
-    
-    # making predictions
-    train_predict = model.predict(X_train)
-    test_predict = model.predict(X_test)
-    
-    # creating separate numpy arrays for mean and standard deviation
-    train_mean = train_predict[:, 0]
-    test_mean = test_predict[:, 0]
-    train_std = train_predict[:, 1]
-    test_std = test_predict[:, 1]
+    model.load_state_dict(best_model_wts)
+    return model
 
-    # Ensure train_mean and train_std are reshaped for inverse_transform
-    train_mean = train_mean.reshape(-1, 1)
-    test_mean = test_mean.reshape(-1, 1)
-    train_std = train_std.reshape(-1, 1)
-    test_std = test_std.reshape(-1, 1)
+def predict_model(model, test_loader, scalers, da_col, quantiles, forecast_horizon, device):
+    model.eval()
+    forecasts, true_values = [], []
 
-    # Inverse transform means
-    train_mean_series, y_train_series, test_mean_series, y_test_series = inverse_transforms(
-        train_mean, y_train, test_mean, y_test, data_series, train_dates, test_dates, scaler, transforms
-    )
+    with torch.no_grad():
+        for x_past, x_future, y in test_loader:
+            x_past, x_future = x_past.to(device), x_future.to(device)
+            preds = model(x_past, x_future)
+            forecasts.append(preds.cpu())
+            true_values.append(y)
 
-    # Inverse transform standard deviations
-    train_std_series, _, test_std_series, _ = inverse_transforms(
-        train_std, y_train, test_std, y_test, data_series, train_dates, test_dates, scaler, transforms
-    )
+    forecasts = torch.cat(forecasts, dim=0).numpy()
+    true_values = torch.cat(true_values, dim=0).numpy()
 
-    # Plot predictions with confidence intervals
-    fig, ax = plt.subplots(figsize=(12, 6))
-    myFmt = mdates.DateFormatter('%H:%M')
-    ax.xaxis.set_major_formatter(myFmt)
+    # Inverse scaling
+    forecast_inv = []
+    for q in range(len(quantiles)):
+        scaled = forecasts[:, q, :].reshape(-1, 1)
+        forecast_inv.append(scalers[da_col].inverse_transform(scaled).reshape(-1, forecast_horizon))
+    forecast_inv = np.stack(forecast_inv, axis=1)
 
-    # Plot actual values
-    plt.plot(y_test_series.index, y_test_series, label="Actual Values", color="blue", alpha=0.7)
+    true_inv = scalers[da_col].inverse_transform(true_values.reshape(-1, 1)).reshape(-1, forecast_horizon)
 
-    # Plot mean predictions
-    plt.plot(test_mean_series.index, test_mean_series, label="Predicted Mean", color="red", alpha=0.8)
+    # Check quantile consistency
+    for sample in range(forecast_inv.shape[0]):
+        for t in range(forecast_inv.shape[2]):
+            for i in range(len(quantiles) - 1):
+                if forecast_inv[sample, i, t] > forecast_inv[sample, i + 1, t]:
+                    print(f"Quantile inconsistency at sample {sample}, time {t}: Q{quantiles[i]} > Q{quantiles[i+1]}")
 
-    # Confidence intervals
-    lower_bound = test_mean_series - 1.96 * test_std_series
-    upper_bound = test_mean_series + 1.96 * test_std_series
-    plt.fill_between(test_mean_series.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% CI")
+    return forecast_inv, true_inv
 
-    # Add labels and legend
-    plt.xlabel("Time")
-    plt.ylabel("Values")
-    plt.title("Predictions with Confidence Intervals")
+
+def plot_forecasts(forecasts, true_values, sample_idx, quantiles, forecast_horizon):
+
+    q_10, q_50, q_90 = forecasts[sample_idx, 0, :], forecasts[sample_idx, 1, :], forecasts[sample_idx, 2, :]
+    true_vals = true_values[sample_idx, :]
+    time_steps = np.arange(forecast_horizon)
+
+    plt.figure(figsize=(12, 6))
+    plt.fill_between(time_steps, q_10, q_90, color='gray', alpha=0.3, label=f"{quantiles[0]} - {quantiles[2]} Quantile Range")
+    plt.plot(time_steps, q_50, label=f"{quantiles[1]} Quantile (Median)", color='blue', linewidth=2)
+    plt.plot(time_steps, true_vals, label="True Values", color='black', linestyle='--', linewidth=2)
+    plt.title("Quantile Forecasts vs True Values")
+    plt.xlabel("Time Step")
+    plt.ylabel("DA Value")
     plt.legend()
+    plt.grid(True)
     plt.show()
-
-    # Calculate RMSE
-    train_rmse = np.sqrt(mean_squared_error(y_train_series, train_mean_series))
-    test_rmse = np.sqrt(mean_squared_error(y_test_series, test_mean_series))
-    print('Train RMSE: %.3f' % train_rmse)
-    print('Test RMSE: %.3f' % test_rmse)
-    
-    return test_mean_series, test_std_series, y_test_series
-
-def gauss_compare(original_series, predictions_mean, predictions_std):
-    """
-    Compare the original series with Gaussian-filtered predictions.
-    
-    Args:
-    - original_series (pd.Series): The original unfiltered time series data.
-    - predictions_mean (pd.Series): The predicted mean values from the model.
-    - predictions_std (pd.Series): The predicted standard deviations from the model.
-
-    Returns:
-    - None: Displays a plot and prints RMSE.
-    """
-    # Align predictions with the last part of the original series
-    aligned_original = original_series[-24:]
-
-    # Calculate confidence intervals
-    lower_bound = predictions_mean - 1.96 * predictions_std
-    upper_bound = predictions_mean + 1.96 * predictions_std
-
-    # Plot the original series and predictions
-    fig, ax = plt.subplots(figsize=(12, 6))
-    myFmt = mdates.DateFormatter('%H:%M')
-    ax.xaxis.set_major_formatter(myFmt)
-
-    plt.plot(aligned_original.index, aligned_original, label="Original Series", color="blue", alpha=0.7)
-    plt.plot(predictions_mean.index, predictions_mean, label="Predicted Mean", color="red", alpha=0.8)
-    plt.fill_between(
-        predictions_mean.index, lower_bound, upper_bound, color='orange', alpha=0.2, label="95% Confidence Interval"
-    )
-    plt.title("Gauss-Filtered Predictions vs. Original Series")
-    plt.xlabel("Time")
-    plt.ylabel("Values")
-    plt.legend()
-    plt.show()
-
-    # Calculate RMSE
-    error = np.sqrt(mean_squared_error(aligned_original, predictions_mean))
-    print('Test RMSE: %.3f' % error)
-
-def accuracy(forecasts,targets):
-    forecasts = forecasts.numpy()
-    targets = targets.numpy()
-    temp = forecasts*targets/np.abs(forecasts*targets)
-
-    temp[temp==-1]=0 # masking the -1 with 0 because the correct ones are only the value 1
-    accuracy_of_sign  = np.sum(temp)/len(forecasts)
-
-    matches = temp==1
-    mismatches = temp==0
-    diff_values_matches = np.abs(targets[matches] - forecasts[matches])
-    diff_values_mismatches = np.abs(targets[mismatches] - forecasts[mismatches])
-    avg_price_paid_mismatches = np.mean(np.abs(forecasts[mismatches])) # forecasts is the diff between the DA and ID which is what you pay if you don't forecast correctly the sign difference (mismatch)
-    avg_price_recieved_matches = np.mean(np.abs(forecasts[matches])) # forecasts is the diff between the DA and ID which is what you get paid if you do forecast correctly the sign difference (match)
-    std_price_paid_mismatches = np.std(np.abs(forecasts[mismatches]))
-    std_price_recieved_matches = np.std(np.abs(forecasts[matches]))
-
-    return accuracy_of_sign, np.mean(diff_values_matches), np.mean(diff_values_mismatches), avg_price_paid_mismatches,avg_price_recieved_matches, std_price_paid_mismatches, std_price_recieved_matches
