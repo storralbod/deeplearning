@@ -2,40 +2,73 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 import numpy as np
+
 class LSTM_multivariate_input_multi_step_forecaster(nn.Module):
-    def __init__(self, input_size,hidden_size,num_layers,dropout, past_horizon, forecast_horizon):
+    def __init__(self, input_size,hidden_size,num_layers,dropout, past_horizon, forecast_horizon, future_inputs_size):
         super().__init__()
         self.forecast_horizon = forecast_horizon
-
+        self.future_inputs_size = future_inputs_size
+        self.mlp_input_size = hidden_size+future_inputs_size*forecast_horizon
         self.lstm = nn.LSTM(input_size,hidden_size,num_layers,dropout=dropout,batch_first=True)
         #self.lstm_autoregressive = nn.LSTM(1,hidden_size,num_layers,dropout=dropout,batch_first=True)
 
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_size,48*3),
+            nn.Linear(hidden_size,48*4),
+            nn.ReLU(),
+            nn.LayerNorm(48*4),
+            nn.Dropout(dropout),
+            nn.Linear(48*4,48*3),
             nn.ReLU(),
             nn.LayerNorm(48*3),
             nn.Dropout(dropout),
-            nn.Linear(48*3,48*2),
+            nn.Linear(48*3,48*3),
             nn.ReLU(),
-            nn.LayerNorm(48*2),
+            nn.LayerNorm(48*3),
             nn.Dropout(dropout),
-            nn.Linear(48*2,48*2),
-            nn.ReLU(),
-            nn.LayerNorm(48*2),
-            nn.Dropout(dropout),
-            nn.Linear(48*2,forecast_horizon)
+            nn.Linear(48*3,forecast_horizon)
         )
 
-    def forward(self,x):
+      #### new expanded mlp with future features ######
+        self.mlp_expanded = nn.Sequential(
+            nn.Linear(self.mlp_input_size,self.mlp_input_size*2),
+            nn.ReLU(),
+            nn.LayerNorm(self.mlp_input_size*2),
+            nn.Dropout(dropout),
+            nn.Linear(self.mlp_input_size*2,self.mlp_input_size*2),
+            nn.ReLU(),
+            nn.LayerNorm(self.mlp_input_size*2),
+            nn.Dropout(dropout),
+            nn.Linear(self.mlp_input_size*2,self.mlp_input_size*2),
+            nn.ReLU(),
+            nn.LayerNorm(self.mlp_input_size*2),
+            nn.Dropout(dropout),
+            nn.Linear(self.mlp_input_size*2,24)
+        )
+
+        #self.all_hourly_mlps = [self.mlp_expanded for h in range(forecast_horizon)]
+
+    def forward(self,x,future_inputs):
 
         if torch.isnan(x).any():
           nans = torch.isnan(x).any().sum()
           raise ValueError(f"Input contains {nans} NaN values")
 
-        lstm_out, _ = self.lstm(x)
-        forecast = self.mlp(lstm_out[:,-1,:])
+        lstm_out, (hidden, c) = self.lstm(x)
+        #forecast = self.mlp(hidden[-1,:,:])
 
-        return forecast.unsqueeze(-1)
+        #### Exapnding to include future features ####
+        context = hidden[-1,:,:]
+        #forecasts = []
+        #for h in range(self.forecast_horizon):
+        #  future_input = torch.cat([context,future_inputs[:,h,:]],axis=1) #[B,feature_size_length=104]
+          #forecast = self.all_hourly_mlps[h](future_input)
+        #  forecast = self.mlp_expanded(future_input)
+        #  forecasts.append(forecast)
+
+        future_input = torch.cat([context,future_inputs.view(future_inputs.shape[0],-1)],axis=1)
+        forecasts = self.mlp_expanded(future_input)
+        #forecasts = torch.cat(forecasts,axis=1).unsqueeze(-1)
+        return forecasts.unsqueeze(-1)
     
 ###########################################
 #       Tamas's experimental model
