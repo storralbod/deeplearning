@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import numpy as np
-import matplotlib.pyplot as plt
-
 class LSTM_multivariate_input_multi_step_forecaster(nn.Module):
     def __init__(self, input_size,hidden_size,num_layers,dropout, past_horizon, forecast_horizon):
         super().__init__()
@@ -42,10 +40,6 @@ class LSTM_multivariate_input_multi_step_forecaster(nn.Module):
 ###########################################
 #       Tamas's experimental model
 ###########################################
-import torch
-import torch.nn as nn
-
-
 class LSTM_Tamas(nn.Module):
     def __init__(self, 
                  past_input_size, 
