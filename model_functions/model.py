@@ -52,12 +52,16 @@ class LSTM_multivariate_input_multi_step_forecaster(nn.Module):
         if torch.isnan(x).any():
           nans = torch.isnan(x).any().sum()
           raise ValueError(f"Input contains {nans} NaN values")
-
+        
         lstm_out, (hidden, c) = self.lstm(x)
         #forecast = self.mlp(hidden[-1,:,:])
 
         #### Exapnding to include future features ####
         context = hidden[-1,:,:]
+
+        future_input = torch.cat([context,future_inputs.view(future_inputs.shape[0],-1)],axis=1)
+        
+
         #forecasts = []
         #for h in range(self.forecast_horizon):
         #  future_input = torch.cat([context,future_inputs[:,h,:]],axis=1) #[B,feature_size_length=104]
@@ -65,7 +69,6 @@ class LSTM_multivariate_input_multi_step_forecaster(nn.Module):
         #  forecast = self.mlp_expanded(future_input)
         #  forecasts.append(forecast)
 
-        future_input = torch.cat([context,future_inputs.view(future_inputs.shape[0],-1)],axis=1)
         forecasts = self.mlp_expanded(future_input)
         #forecasts = torch.cat(forecasts,axis=1).unsqueeze(-1)
         return forecasts.unsqueeze(-1)
@@ -323,3 +326,59 @@ class TimeSeriesDataset(Dataset):
         # shape: [forecast_horizon]
 
         return x_past, x_future, y
+    
+
+
+class LSTM_QuantileForecaster(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, dropout, past_horizon, forecast_horizon, future_inputs_size, quantiles):
+        super().__init__()
+        self.forecast_horizon = forecast_horizon
+        self.hidden_size = hidden_size
+        self.quantiles = quantiles
+
+        # LSTM Encoder
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, dropout=dropout, batch_first=True)
+
+        # Fully connected layers for each quantile
+        self.mlp_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_size + future_inputs_size * forecast_horizon, hidden_size * 2),
+                nn.ReLU(),
+                nn.LayerNorm(hidden_size * 2),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_size * 2, forecast_horizon)
+            )
+            for _ in range(len(quantiles))
+        ])
+
+    def forward(self, x_past, x_future):
+        """
+        Forward pass for the quantile forecaster.
+
+        Args:
+            x_past: Tensor of shape [batch_size, past_horizon, input_size].
+            x_future: Tensor of shape [batch_size, forecast_horizon, future_inputs_size].
+
+        Returns:
+            quantile_forecasts: Tensor of shape [batch_size, len(quantiles), forecast_horizon].
+        """
+        if torch.isnan(x_past).any() or torch.isnan(x_future).any():
+            raise ValueError("Input contains NaN values")
+
+        # Encode the past data with LSTM
+        lstm_out, (hidden, _) = self.lstm(x_past)  # lstm_out: [batch_size, past_horizon, hidden_size]
+        context = hidden[-1, :, :]  # Take the last hidden state: [batch_size, hidden_size]
+
+        # Flatten future inputs and concatenate with LSTM context
+        future_input_flat = x_future.view(x_future.size(0), -1)  # [batch_size, future_inputs_size * forecast_horizon]
+        combined_input = torch.cat([context, future_input_flat], dim=1)  # [batch_size, hidden_size + future_inputs_size * forecast_horizon]
+
+        # Predict quantiles using separate MLP heads
+        quantile_forecasts = []
+        for mlp in self.mlp_heads:
+            quantile_forecasts.append(mlp(combined_input))  # [batch_size, forecast_horizon]
+
+        # Stack quantile forecasts
+        quantile_forecasts = torch.stack(quantile_forecasts, dim=1)  # [batch_size, len(quantiles), forecast_horizon]
+
+        return quantile_forecasts
