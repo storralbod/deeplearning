@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import glob
 from torch.utils import data
+from torch.utils.data import DataLoader, Dataset
 from sklearn.preprocessing import MinMaxScaler
 
 # Function to encode time (day, month, hour) as sine and cosine
@@ -132,8 +133,8 @@ def minmaxscaler(inputs):
 
   return scaler,inputs_scaled.ravel()
 
-class Dataset(data.Dataset):
-    def __init__(self, inputs, targets, future_inputs):
+class Dataset(Dataset):
+    def __init__(self, inputs, targets):
         self.inputs = inputs
         self.targets = targets
         self.future_inputs = future_inputs
@@ -188,35 +189,3 @@ def create_datasets(input_data,output_data, lag_in_days, forecast_horizon_in_hou
     test_set = dataset_class(inputs[-num_test:], outputs[-num_test:],future_inputs[-num_test:])
 
     return training_set, val_set, test_set
-
-
-
-def create_difference_datasets():
-
-    data = create_dataframe()
-    # retriving only prices from data (not date columns)
-    da_prices = data['price1']
-    id_prices = data['price2']
-    date_features = data[['Hour_Sin', 'Hour_Cos', 'Day_Sin', 'Day_Cos', 'Month_Sin', 'Month_Cos', 'Year_Scaled']]
-
-    # discretizing prices (in this case delta=1 so it is equal to rounding them to nearest integer)
-    da_discrete_prices = discrete_prices(da_prices,delta=1)
-    id_discrete_prices = list(id_prices.apply(lambda x: discrete_prices(x,delta=1), axis=0))
-
-    # setting DA price labels
-    da_prices_one_hot = one_hot_encoding(da_prices,da_discrete_prices)
-    id_prices_one_hot = [one_hot_encoding(id_prices[column],id_discrete_prices[i]) for i,column in enumerate(id_prices.columns)]
-
-    # setting datasets
-    lag_in_days = 2
-    forecast_horizon_in_hours = 24
-    input_data = np.hstack([np.array(date_features),np.array(da_prices).reshape(len(da_prices),1),np.array(id_prices)])
-    output_data_DA = np.array(da_prices).reshape(len(da_prices),1)
-    output_data_ID = np.array(id_prices.iloc[:,-1]).reshape(len(id_prices),1)
-    training_set_DA, val_set_DA, test_set_DA = create_datasets(input_data,output_data_DA,lag_in_days,forecast_horizon_in_hours,Dataset)
-    training_set_ID, val_set_ID, test_set_ID = create_datasets(input_data,output_data_ID,lag_in_days,forecast_horizon_in_hours,Dataset)
-    training_set_DA_diff_ID, val_set_DA_diff_ID, test_set_DA_diff_ID = create_datasets(input_data,output_data_DA-output_data_ID,lag_in_days,forecast_horizon_in_hours,Dataset)
-
-    return training_set_DA, val_set_DA, test_set_DA, training_set_ID, val_set_ID, test_set_ID, training_set_DA_diff_ID, val_set_DA_diff_ID, test_set_DA_diff_ID
-
-

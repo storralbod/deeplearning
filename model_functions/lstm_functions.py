@@ -4,27 +4,21 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
+from data_prep import create_datasets, Dataset
 
 def prepare_data(file_path, lags, temporal_cols, gas_col, da_col, id_col, forecast_horizon):
     # Load data
     data = pd.read_csv(file_path)
     data = data.dropna().reset_index(drop=True)
     data = data.drop(columns=['Volume_MWh', 'Diff', 'Year', 'Month', 'Day', 'Hour'])
-    # # Create lagged features
-    # for col in [da_col, id_col]:
-    #     for lag in lags:
-    #         data[f'{col}_t-{lag}'] = data[col].shift(lag)
+    output_data = np.array(data.loc[:, da_col]).reshape(-1, 1)
+    data = np.array(data)
+    
+    train_data, test_data, val_data = create_datasets(data, output_data, 2, forecast_horizon, Dataset, p_train=0.8, p_val=0, p_test=0.2)
 
-    # for lag in [24, 48]:
-    #     data[f'Price_EUR_MWh_t-{lag}'] = data['Price_EUR_MWh'].shift(lag)
-
-    # Drop rows with NaN values
-    # data = data.dropna().reset_index(drop=True)
-
-    # Train-test split
-    train_size = max(lags)+forecast_horizon+1
-    train_data = data.iloc[:train_size].reset_index(drop=True)
-    test_data = data.iloc[train_size:].reset_index(drop=True)
+    train_data = pd.DataFrame(train_data)
+    test_data = pd.DataFrame(test_data)
+    val_data = pd.DataFrame(val_data)
 
     # Scaling
     scale_cols = [da_col, id_col, gas_col]
@@ -50,28 +44,20 @@ def quantile_loss(y, y_hat, quantiles):
 
     return torch.mean(torch.stack(losses)) + 0.5 * ordering_penalty
 
-# Quantile Diversity Regularization
-def quantile_diversity_loss(y_hat, quantiles):
-    diversity_penalty = 0
-    for i in range(len(quantiles) - 1):
-        diversity_penalty += torch.abs(y_hat[:, i, :] - y_hat[:, i + 1, :]).mean()
-    return 0.01 * diversity_penalty
-
-def temporal_smoothing_loss(y_hat):
-    return torch.mean(torch.abs(y_hat[:, :, 1:] - y_hat[:, :, :-1]))
-
-def train_model(model, train_loader, optimizer, quantiles, device, num_epochs=3, clip_grad=5.0):
-    
+def train_and_evaluate_model(model, train_loader, val_loader, optimizer, quantiles, device, num_epochs=3, clip_grad=5.0):
     best_loss = float('inf')
     best_model_wts = copy.deepcopy(model.state_dict())
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=0.5)
 
+    train_losses = []
+    val_losses = []
 
     for epoch in range(num_epochs):
         model.train()
-        epoch_loss = 0.0
+        epoch_train_loss = 0.0
 
+        # Training phase
         for x_past, x_future, y in train_loader:
             x_past, x_future, y = x_past.to(device), x_future.to(device), y.to(device)
 
@@ -81,25 +67,47 @@ def train_model(model, train_loader, optimizer, quantiles, device, num_epochs=3,
             forecasts = model(x_past)
 
             # Loss calculation
-            loss = quantile_loss(y, forecasts, quantiles) + 0.01 * quantile_diversity_loss(forecasts, quantiles) + 0.01 * temporal_smoothing_loss(forecasts)
+            loss = quantile_loss(y, forecasts, quantiles)
+            train_losses.append(loss.item())
             loss.backward()
 
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
             optimizer.step()
 
-            epoch_loss += loss.item()
+            epoch_train_loss += loss.item()
 
-        avg_loss = epoch_loss / len(train_loader)
-        print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
-        scheduler.step(avg_loss)
-        # Save the best model
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        avg_train_loss = epoch_train_loss / len(train_loader)
+
+        # Validation phase
+        model.eval()
+        epoch_val_loss = 0.0
+        with torch.no_grad():
+            for x_past, x_future, y in val_loader:
+                x_past, x_future, y = x_past.to(device), x_future.to(device), y.to(device)
+                forecasts = model(x_past)
+
+                loss = quantile_loss(y, forecasts, quantiles)
+                epoch_val_loss += loss.item()
+
+        avg_val_loss = epoch_val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
+
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+
+        # Learning rate scheduler
+        scheduler.step(avg_val_loss)
+
+        # Save the best model based on validation loss
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
             best_model_wts = copy.deepcopy(model.state_dict())
 
     model.load_state_dict(best_model_wts)
-    return model
+
+    plot_training_validation_loss(train_losses, val_losses)
+    # Return both the model and the loss history for analysis
+    return model, train_losses, val_losses
 
 def predict_model(model, test_loader, scalers, da_col, quantiles, forecast_horizon, device):
     model.eval()
@@ -114,7 +122,6 @@ def predict_model(model, test_loader, scalers, da_col, quantiles, forecast_horiz
 
     forecasts = torch.cat(forecasts, dim=0).numpy()
     true_values = torch.cat(true_values, dim=0).numpy()
-
     # Inverse scaling
     forecast_inv = []
     for q in range(len(quantiles)):
@@ -208,3 +215,25 @@ def train_and_val(train_data_loader,val_data_loader,num_epochs,model,optimizer,c
     plt.show()
 
     return model
+
+def plot_training_validation_loss(train_losses, val_losses):
+    """
+    Plots training and validation losses.
+    Args:
+    - train_losses (list): List of training loss values.
+    - val_losses (list): List of validation loss values.
+    """
+    epochs = range(1, len(train_losses) + 1)
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, train_losses, label='Training Loss')
+    plt.plot(epochs, val_losses, label='Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+# Example usage
+# plot_training_validation_loss(tr_loss, val_loss)
