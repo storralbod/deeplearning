@@ -1,7 +1,7 @@
 import pandas as pd 
 import numpy as np
 import glob
-import data
+from torch.utils import data
 from sklearn.preprocessing import MinMaxScaler
 
 # Function to encode time (day, month, hour) as sine and cosine
@@ -133,9 +133,10 @@ def minmaxscaler(inputs):
   return scaler,inputs_scaled.ravel()
 
 class Dataset(data.Dataset):
-    def __init__(self, inputs, targets):
+    def __init__(self, inputs, targets, future_inputs):
         self.inputs = inputs
         self.targets = targets
+        self.future_inputs = future_inputs
 
     def __len__(self):
         # Return the size of the dataset
@@ -145,8 +146,9 @@ class Dataset(data.Dataset):
         # Retrieve inputs and targets at the given index
         X = self.inputs[index]
         y = self.targets[index]
+        future = self.future_inputs[index]
 
-        return X, y
+        return X, y, future
 
 
 def create_datasets(input_data,output_data, lag_in_days, forecast_horizon_in_hours, dataset_class, p_train=0.9, p_val=0.1, p_test=0):
@@ -155,7 +157,6 @@ def create_datasets(input_data,output_data, lag_in_days, forecast_horizon_in_hou
 
     hours = len(input_data)
     lag_in_hours = lag_in_days*24
-    #forecast_hours = forecast_horizon_in_days*24
 
     num_train = int((hours-lag_in_hours-forecast_horizon_in_hours)/forecast_horizon_in_hours*p_train)
     num_val = int((hours-lag_in_hours-forecast_horizon_in_hours)/forecast_horizon_in_hours*p_val)
@@ -167,23 +168,28 @@ def create_datasets(input_data,output_data, lag_in_days, forecast_horizon_in_hou
 
         # features dataset to include prices from [t:t-14, t-1year-14:t-1year+14]. So from present to 2 weeks in past and what ocurred one_year before two weeks behind and ahead
         # for now (small dataset) prices from [t:t-14]
-        inputs, outputs = [], []
+        inputs, outputs, future_inputs = [], [], []
         for i in range(12,hours,24): # features only given for clearing time t=12h everyday
 
             if i+lag_in_hours+forecast_horizon_in_hours > hours:
-                break
+              break
 
             inputs.append(input_data[i:i+lag_in_hours,:])
             outputs.append(output_data[i+lag_in_hours:i+lag_in_hours+forecast_horizon_in_hours])
+            
+            future_inputs.append(input_data[i+lag_in_hours:i+lag_in_hours+forecast_horizon_in_hours,:7]) # future date features and load features
 
-        return np.array(inputs), np.array(outputs)
 
-    inputs, outputs = create_features(input_data,output_data, lag_in_hours, hours)
-    training_set = dataset_class(inputs[:num_train],outputs[:num_train])
-    val_set = dataset_class(inputs[num_train:num_train+num_val],outputs[num_train:num_train+num_val])
-    test_set = dataset_class(inputs[-num_test:], outputs[-num_test:])
+        return np.array(inputs), np.array(outputs), np.array(future_inputs)
+
+    inputs, outputs, future_inputs = create_features(input_data,output_data, lag_in_hours, hours)
+    training_set = dataset_class(inputs[:num_train],outputs[:num_train],future_inputs[:num_train])
+    val_set = dataset_class(inputs[num_train:num_train+num_val],outputs[num_train:num_train+num_val],future_inputs[num_train:num_train+num_val])
+    test_set = dataset_class(inputs[-num_test:], outputs[-num_test:],future_inputs[-num_test:])
 
     return training_set, val_set, test_set
+
+
 
 def create_difference_datasets():
 

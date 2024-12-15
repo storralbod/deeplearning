@@ -150,3 +150,61 @@ def plot_forecasts(forecasts, true_values, sample_idx, quantiles, forecast_horiz
     plt.legend()
     plt.grid(True)
     plt.show()
+
+def train_and_val(train_data_loader,val_data_loader,num_epochs,model,optimizer,criterion):
+
+    model.train()
+    losses_train = []
+    losses_val = []
+    for epoch in range(num_epochs):
+        forecasts_list =[]
+        targets_list = []
+        epoch_loss = 0
+        for i,(inputs,targets,future_inputs) in enumerate(train_data_loader):
+
+            inputs = inputs.float()
+            targets = targets.float() 
+            future_inputs = future_inputs.float()
+
+            inputs = torch.nan_to_num(inputs, nan=10.0) # Hour 2039 has nan values for some reason
+            targets = torch.nan_to_num(targets, nan=10.0) # idem
+            future_inputs = torch.nan_to_num(future_inputs, nan=10.0)
+            forecasts = model_DA(inputs,future_inputs)
+            forecasts_list.append(forecasts.data)
+            targets_list.append(targets.data)
+            loss = criterion(forecasts,targets)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+    epoch_loss_avg_train = epoch_loss/(i+1)
+    losses_train.append(epoch_loss_avg_train)
+
+
+    model.eval()
+    epoch_loss_val = 0
+    with torch.no_grad():
+        for i,(inputs,targets,future_inputs) in enumerate(val_data_loader):
+
+            inputs = inputs.float()
+            targets = targets.float()
+            future_inputs = future_inputs.float()
+            forecasts = model(inputs,future_inputs)
+            loss = criterion(forecasts,targets)
+
+            epoch_loss_val += loss.item()
+
+    epoch_loss_avg_eval = epoch_loss_val/(i+1)
+    losses_val.append(epoch_loss_avg_eval)
+
+    print(f'DA Epoch [{epoch+1}/{num_epochs}], Loss train: {epoch_loss_avg_train:.4f} Loss val: {epoch_loss_avg:.4f} ')
+
+    plt.plot(losses_train,label='Training Losses')
+    plt.plot(losses_val,label='Validation Losses')
+    plt.legend()
+    plt.show()
+
+    return model
