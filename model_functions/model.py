@@ -44,26 +44,8 @@ class LSTM_multivariate_input_multi_step_forecaster(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(self.mlp_input_size*2,24)
         )
-        def mlp_per_hour(h):
-          self.mlp_input_size = hidden_size+future_inputs_size*h
-          self.mlp_expanded = nn.Sequential(
-            nn.Linear(self.mlp_input_size,self.mlp_input_size*2),
-            nn.ReLU(),
-            nn.LayerNorm(self.mlp_input_size*2),
-            nn.Dropout(dropout),
-            nn.Linear(self.mlp_input_size*2,self.mlp_input_size*2),
-            nn.ReLU(),
-            nn.LayerNorm(self.mlp_input_size*2),
-            nn.Dropout(dropout),
-            nn.Linear(self.mlp_input_size*2,self.mlp_input_size*2),
-            nn.ReLU(),
-            nn.LayerNorm(self.mlp_input_size*2),
-            nn.Dropout(dropout),
-            nn.Linear(self.mlp_input_size*2,1)
-        )
-          return self.mlp_expanded
 
-        self.all_hourly_mlps = nn.ModuleList([mlp_per_hour(h) for h in range(forecast_horizon)])
+        #self.all_hourly_mlps = [self.mlp_expanded for h in range(forecast_horizon)]
 
     def forward(self,x,future_inputs):
 
@@ -76,14 +58,6 @@ class LSTM_multivariate_input_multi_step_forecaster(nn.Module):
 
         #### Exapnding to include future features ####
         context = hidden[-1,:,:]
-        forecasts = []
-        for h in range(self.forecast_horizon):
-          future_input = torch.cat([context,future_inputs[:,:h,:].view(future_inputs.shape[0],-1)],axis=1) #[B,feature_size_length=104]
-          #print(future_input.shape)
-          forecast = self.all_hourly_mlps[h](future_input)
-          #forecast = self.mlp_expanded(future_input)
-          #print(forecast.shape)
-          forecasts.append(forecast)
 
         future_input = torch.cat([context,future_inputs.view(future_inputs.shape[0],-1)],axis=1)
         
@@ -95,11 +69,6 @@ class LSTM_multivariate_input_multi_step_forecaster(nn.Module):
         #  forecast = self.mlp_expanded(future_input)
         #  forecasts.append(forecast)
 
-        #future_input = torch.cat([context,future_inputs.view(future_inputs.shape[0],-1)],axis=1)
-        #forecasts = self.mlp_expanded(future_input)
-        forecasts = torch.cat(forecasts,axis=1).unsqueeze(-1)
-        return forecasts
-        #return forecasts.unsqueeze(-1)
         forecasts = self.mlp_expanded(future_input)
         #forecasts = torch.cat(forecasts,axis=1).unsqueeze(-1)
         return forecasts.unsqueeze(-1)
