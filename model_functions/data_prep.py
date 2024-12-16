@@ -1,8 +1,7 @@
 import pandas as pd 
 import numpy as np
 import glob
-from torch.utils import data
-from torch.utils.data import DataLoader, Dataset
+import torch
 from sklearn.preprocessing import MinMaxScaler
 
 # Function to encode time (day, month, hour) as sine and cosine
@@ -133,59 +132,184 @@ def minmaxscaler(inputs):
 
   return scaler,inputs_scaled.ravel()
 
-class Dataset(Dataset):
-    def __init__(self, inputs, targets):
-        self.inputs = inputs
-        self.targets = targets
-        self.future_inputs = future_inputs
+def create_features(input_features, target, dense_lookback, spaced_lookback, forecast_horizon, future_indices):
+    """
+    Create features with both dense and spaced lookback for short- and long-term patterns.
+    """
+    past_inputs, future_inputs, outputs = [], [], []
 
-    def __len__(self):
-        # Return the size of the dataset
-        return len(self.targets)
+    # Create indices for spaced lookback
+    spaced_steps = np.arange(0, spaced_lookback, step=24)  # Example: every 24 timesteps (1 day)
 
-    def __getitem__(self, index):
-        # Retrieve inputs and targets at the given index
-        X = self.inputs[index]
-        y = self.targets[index]
-        future = self.future_inputs[index]
+    for i in range(len(input_features) - max(dense_lookback, spaced_lookback) - forecast_horizon):
+        # Extract dense past features
+        dense_past_features = input_features[i : i + dense_lookback]
 
-        return X, y, future
+        # Extract spaced past features
+        spaced_past_features = input_features[i + spaced_steps]
+
+        # Combine dense and spaced features
+        past_features = np.concatenate([dense_past_features, spaced_past_features], axis=0)
+
+        # Extract target values for the forecast horizon
+        target_slice = target[i + dense_lookback : i + dense_lookback + forecast_horizon]
+
+        # Ensure target slice has the correct length
+        if len(target_slice) != forecast_horizon:
+            continue
+
+        # Extract future features, if specified
+        if future_indices is not None:
+            future_features = input_features[i + dense_lookback : i + dense_lookback + forecast_horizon, future_indices]
+            # Skip iteration if future_features is incomplete
+            if future_features.shape[0] != forecast_horizon:
+                continue
+        else:
+            future_features = np.zeros((forecast_horizon, input_features.shape[1]))  # Placeholder
+
+        # Append to the lists
+        past_inputs.append(past_features)
+        future_inputs.append(future_features)
+        outputs.append(target_slice)
+
+    # Convert lists to NumPy arrays
+    past_inputs = np.array(past_inputs)  # Shape: [samples, lookback_steps, features]
+    future_inputs = np.array(future_inputs)  # Shape: [samples, forecast_horizon, future_features]
+    outputs = np.array(outputs)  # Shape: [samples, forecast_horizon, targets]
+
+    return past_inputs, future_inputs, outputs
 
 
-def create_datasets(input_data,output_data, lag_in_days, forecast_horizon_in_hours, dataset_class, p_train=0.9, p_val=0.1, p_test=0):
+def create_datasets(features, target, dense_lookback, spaced_lookback, forecast_horizon, future_cols=None, p_train=0.7, p_val=0.2, p_test=0.1):
+    """
+    Create datasets with dense and spaced lookback for LSTM training.
+    """
+    assert len(features) == len(target), "Features and target must have the same length"
 
-    assert len(input_data) == len(output_data)
+    hours = len(features)
 
-    hours = len(input_data)
-    lag_in_hours = lag_in_days*24
+    # Extract the indices of the future columns
+    if future_cols is not None:
+        future_indices = future_cols
+    else:
+        future_indices = None
 
-    num_train = int((hours-lag_in_hours-forecast_horizon_in_hours)/forecast_horizon_in_hours*p_train)
-    num_val = int((hours-lag_in_hours-forecast_horizon_in_hours)/forecast_horizon_in_hours*p_val)
-    num_test = int((hours-lag_in_hours-forecast_horizon_in_hours)/forecast_horizon_in_hours*p_test)
+    # Set dataset sizes
+    usable_hours = hours - max(dense_lookback, spaced_lookback) - forecast_horizon
+    num_train = int(usable_hours * p_train)
+    num_val = int(usable_hours * p_val)
+    num_test = usable_hours - num_train - num_val
+
+    # Generate features and labels
+    past_inputs, future_inputs, outputs = create_features(
+        features, target, dense_lookback, spaced_lookback, forecast_horizon, future_indices
+    )
+
+    # Split into train, val, and test sets
+    train_cutoff = num_train
+    val_cutoff = num_train + num_val
+
+    train_past = past_inputs[:train_cutoff]
+    val_past = past_inputs[train_cutoff:val_cutoff]
+    test_past = past_inputs[val_cutoff:]
+
+    train_future = future_inputs[:train_cutoff]
+    val_future = future_inputs[train_cutoff:val_cutoff]
+    test_future = future_inputs[val_cutoff:]
+
+    train_targets = outputs[:train_cutoff]
+    val_targets = outputs[train_cutoff:val_cutoff]
+    test_targets = outputs[val_cutoff:]
+
+    return train_past, train_future, train_targets, val_past, val_future, val_targets, test_past, test_future, test_targets
 
 
-    # Creating features and labels dataset
-    def create_features(input_data, output_data, lag_in_hours, hours):
+def prepare_data(file_path, dense_lookback, spaced_lookback, forecast_horizon, future_cols, gas_col, da_col, id_col):
+    """
+    Prepare data for forked training with dense and spaced lookback.
+    Args:
+        file_path (str): Path to the CSV file containing the dataset.
+        dense_lookback (int): Number of consecutive timesteps for dense lookback.
+        spaced_lookback (int): Maximum lookback period for spaced lookback.
+        forecast_horizon (int): Number of timesteps to forecast.
+        future_cols (list): Names of future columns.
+        gas_col, da_col, id_col (str): Column names for specific features.
+    Returns:
+        Tuple of train, validation, test datasets and scalers (feature scalers and target scaler).
+    """
+    # Load and preprocess data
+    data = pd.read_csv(file_path)
+    data = data.dropna().reset_index(drop=True)
+    data = data.drop(columns=["Volume_MWh", "Diff", "Year", "Month", "Day", "Hour"])
 
-        # features dataset to include prices from [t:t-14, t-1year-14:t-1year+14]. So from present to 2 weeks in past and what ocurred one_year before two weeks behind and ahead
-        # for now (small dataset) prices from [t:t-14]
-        inputs, outputs, future_inputs = [], [], []
-        for i in range(12,hours,24): # features only given for clearing time t=12h everyday
+    # Prepare target and feature indices
+    output_data = np.array(data.loc[:, da_col]).reshape(-1, 1)
+    future_indices = [data.columns.get_loc(col) for col in future_cols]
 
-            if i+lag_in_hours+forecast_horizon_in_hours > hours:
-              break
+    # Scaling preparation
+    scale_cols = [da_col, id_col, gas_col]
+    scale_indices = [data.columns.get_loc(col) for col in scale_cols]
 
-            inputs.append(input_data[i:i+lag_in_hours,:])
-            outputs.append(output_data[i+lag_in_hours:i+lag_in_hours+forecast_horizon_in_hours])
-            
-            future_inputs.append(input_data[i+lag_in_hours:i+lag_in_hours+forecast_horizon_in_hours,:7]) # future date features and load features
+    # Convert to NumPy array for faster processing
+    data = np.array(data)
 
+    # Create past and future datasets with dense and spaced lookback
+    train_past, train_future, train_targets, val_past, val_future, val_targets, test_past, test_future, test_targets = create_datasets(
+        features=data,
+        target=output_data,
+        dense_lookback=dense_lookback,
+        spaced_lookback=spaced_lookback,
+        forecast_horizon=forecast_horizon,
+        future_cols=future_indices,
+        p_train=0.7,
+        p_val=0.2,
+        p_test=0.1,
+    )
 
-        return np.array(inputs), np.array(outputs), np.array(future_inputs)
+    # Initialize scalers for features
+    scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in scale_cols}
 
-    inputs, outputs, future_inputs = create_features(input_data,output_data, lag_in_hours, hours)
-    training_set = dataset_class(inputs[:num_train],outputs[:num_train],future_inputs[:num_train])
-    val_set = dataset_class(inputs[num_train:num_train+num_val],outputs[num_train:num_train+num_val],future_inputs[num_train:num_train+num_val])
-    test_set = dataset_class(inputs[-num_test:], outputs[-num_test:],future_inputs[-num_test:])
+    # Apply scaling to past features only
+    for col, idx in zip(scale_cols, scale_indices):
+        # Fit the scaler on the training past data (flattened)
+        flat_train_past = train_past[:, :, idx].flatten().reshape(-1, 1)
+        scalers[col].fit(flat_train_past)
 
-    return training_set, val_set, test_set
+        # Transform train, val, and test datasets using the same scaler
+        for dataset in [train_past, val_past, test_past]:
+            dataset[:, :, idx] = scalers[col].transform(
+                dataset[:, :, idx].reshape(-1, 1)
+            ).reshape(dataset.shape[0], dataset.shape[1])
+
+    # Scale the targets (output_data)
+    target_scaler = MinMaxScaler(feature_range=(0, 1))
+    train_targets = target_scaler.fit_transform(train_targets.reshape(-1, 1)).reshape(train_targets.shape)
+    val_targets = target_scaler.transform(val_targets.reshape(-1, 1)).reshape(val_targets.shape)
+    test_targets = target_scaler.transform(test_targets.reshape(-1, 1)).reshape(test_targets.shape)
+
+    # Convert datasets to PyTorch tensors 32
+    train_past = torch.tensor(train_past, dtype=torch.float32)
+    train_future = torch.tensor(train_future, dtype=torch.float32)
+    train_targets = torch.tensor(train_targets, dtype=torch.float32)
+
+    val_past = torch.tensor(val_past, dtype=torch.float32)
+    val_future = torch.tensor(val_future, dtype=torch.float32)
+    val_targets = torch.tensor(val_targets, dtype=torch.float32)
+
+    test_past = torch.tensor(test_past, dtype=torch.float32)
+    test_future = torch.tensor(test_future, dtype=torch.float32)
+    test_targets = torch.tensor(test_targets, dtype=torch.float32)
+
+    # Return datasets and scalers
+    return (
+        train_past,
+        train_future,
+        train_targets,
+        val_past,
+        val_future,
+        val_targets,
+        test_past,
+        test_future,
+        test_targets,
+        target_scaler,
+    )
