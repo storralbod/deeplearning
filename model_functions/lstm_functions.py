@@ -29,63 +29,12 @@ def quantile_loss(y, y_hat, quantiles):
 
     return torch.mean(torch.stack(losses)) + 0.5 * ordering_penalty
 
-# Training and Validation Function for Forked Training
-def train_and_val(train_loader, val_loader, num_epochs, model, optimizer, quantiles, device):
+
+
+def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon, device, spaced=False):
     """
-    Trains and validates the model using both past and future data simultaneously.
-    """
-    train_losses, val_losses = [], []
-
-    for epoch in range(num_epochs):
-        # Training Phase
-        model.train()
-        train_loss = 0
-        for batch_idx, (past_inputs, future_inputs, targets) in enumerate(train_loader):
-            past_inputs, future_inputs, targets = (
-                past_inputs.to(device).float(),
-                future_inputs.to(device).float(),
-                targets.to(device).float(),
-            )
-
-            optimizer.zero_grad()
-            forecasts = model(past_inputs, future_inputs)
-            loss = quantile_loss(targets, forecasts, quantiles)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
-
-        train_loss /= (batch_idx + 1)
-        train_losses.append(train_loss)
-
-        # Validation Phase
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for batch_idx, (past_inputs, future_inputs, targets) in enumerate(val_loader):
-                past_inputs, future_inputs, targets = (
-                    past_inputs.to(device).float(),
-                    future_inputs.to(device).float(),
-                    targets.to(device).float(),
-                )
-
-                forecasts = model(past_inputs, future_inputs)
-                loss = quantile_loss(targets, forecasts, quantiles)
-                val_loss += loss.item()
-
-        val_loss /= (batch_idx + 1)
-        val_losses.append(val_loss)
-
-        print(
-            f"Epoch [{epoch + 1}/{num_epochs}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}"
-        )
-
-    # Plot Training and Validation Losses
-    plot_training_validation_loss(train_losses, val_losses)
-    return model, train_losses, val_losses
-
-def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon, device):
-    """
-    Predicts using the model on the test dataset.
+    Predict using the model on the test dataset.
+    
     Args:
         model: Trained model for prediction.
         test_loader: DataLoader containing the test dataset.
@@ -93,6 +42,8 @@ def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon
         quantiles: List of quantiles for the predictions.
         forecast_horizon: Number of timesteps in the forecast horizon.
         device: Torch device to use for computation (CPU/GPU).
+        spaced (bool): Whether the model is a spaced model (True) or simple model (False).
+    
     Returns:
         forecast_inv: Inverse scaled forecasts with shape [num_samples, len(quantiles), forecast_horizon].
         true_inv: Inverse scaled true values with shape [num_samples, forecast_horizon].
@@ -101,9 +52,21 @@ def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon
     forecasts, true_values = [], []
 
     with torch.no_grad():
-        for past_inputs, future_inputs, targets in test_loader:
-            past_inputs, future_inputs = past_inputs.to(device), future_inputs.to(device)
-            preds = model(past_inputs, future_inputs)
+        for batch in test_loader:
+            # Separate inputs based on model type
+            if spaced:
+                dense_inputs, spaced_inputs, future_inputs, targets = batch
+                dense_inputs, spaced_inputs, future_inputs = (
+                    dense_inputs.to(device),
+                    spaced_inputs.to(device),
+                    future_inputs.to(device),
+                )
+                preds = model(dense_inputs, spaced_inputs, future_inputs)
+            else:
+                dense_inputs, future_inputs, targets = batch
+                dense_inputs, future_inputs = dense_inputs.to(device), future_inputs.to(device)
+                preds = model(dense_inputs, future_inputs)
+
             forecasts.append(preds.cpu())
             true_values.append(targets)
 
@@ -124,23 +87,6 @@ def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon
     forecast_inv = np.stack(forecast_inv, axis=1)  # Combine quantiles into a single array
 
     return forecast_inv, true_inv
-
-# Plot Training and Validation Losses
-def plot_training_validation_loss(train_losses, val_losses):
-    """
-    Plots training and validation losses.
-    """
-    epochs = range(1, len(train_losses) + 1)
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(epochs, train_losses, label='Training Loss')
-    plt.plot(epochs, val_losses, label='Validation Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
 
 # Plot Forecasts
 def plot_forecasts(forecasts, true_values, sample_idx, quantiles, forecast_horizon):

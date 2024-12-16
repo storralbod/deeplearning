@@ -3,6 +3,7 @@ import numpy as np
 import glob
 import torch
 from sklearn.preprocessing import MinMaxScaler
+from torch.utils.data import Dataset
 
 # Function to encode time (day, month, hour) as sine and cosine
 def encode_time(value, max_value):
@@ -132,110 +133,184 @@ def minmaxscaler(inputs):
 
   return scaler,inputs_scaled.ravel()
 
-def create_features(input_features, target, dense_lookback, spaced_lookback, forecast_horizon, future_indices):
+def create_features(input_features, target, dense_lookback, spaced_lookback, forecast_horizon, future_indices=None, step_growth_factor=None):
     """
-    Create features with both dense and spaced lookback for short- and long-term patterns.
+    Create features with both dense and optionally spaced lookback for short- and long-term patterns.
+    
+    Args:
+    - input_features (np.ndarray): Feature data.
+    - target (np.ndarray): Target variable.
+    - dense_lookback (int): Number of consecutive recent timesteps for dense lookback.
+    - spaced_lookback (int): Maximum lookback period (e.g., 2 years). Set to 0 to skip spaced lookback.
+    - forecast_horizon (int): Number of timesteps to forecast.
+    - future_indices (list[int], optional): Indices of future features.
+    - step_growth_factor (float, optional): If provided, creates dynamic spaced steps with growing intervals.
+    
+    Returns:
+    - dense_past_inputs (np.ndarray): Dense lookback features. Shape: [samples, dense_lookback, features].
+    - spaced_past_inputs (np.ndarray): Spaced lookback features. Shape: [samples, spaced_steps, features] or None.
+    - future_inputs (np.ndarray): Future features for the decoder. Shape: [samples, forecast_horizon, future_features].
+    - outputs (np.ndarray): Forecast horizon target values. Shape: [samples, forecast_horizon, targets].
     """
-    past_inputs, future_inputs, outputs = [], [], []
+    dense_past_inputs, spaced_past_inputs, future_inputs, outputs = [], [], [], []
 
-    # Create indices for spaced lookback
-    spaced_steps = np.arange(0, spaced_lookback, step=24)  # Example: every 24 timesteps (1 day)
+    # Generate spaced steps
+    if spaced_lookback > 0:
+        if step_growth_factor is not None:
+            # Dynamic step generation
+            spaced_steps = [0]  # Start at timestep t
+            step_size = 24  # Start with 1 day (24 timesteps)
+            total_steps = 0
 
-    for i in range(len(input_features) - max(dense_lookback, spaced_lookback) - forecast_horizon):
+            while total_steps + step_size < spaced_lookback:
+                total_steps += step_size
+                spaced_steps.append(total_steps)
+                step_size = int(step_size * step_growth_factor)  # Increase step size
+
+            spaced_steps = np.array(spaced_steps)
+        else:
+            # Fixed step size
+            spaced_steps = np.arange(0, spaced_lookback, step=24)
+    else:
+        spaced_steps = None
+
+    for i in range(len(input_features) - dense_lookback - (max(spaced_steps) if spaced_steps is not None else 0) - forecast_horizon):
         # Extract dense past features
         dense_past_features = input_features[i : i + dense_lookback]
 
-        # Extract spaced past features
-        spaced_past_features = input_features[i + spaced_steps]
-
-        # Combine dense and spaced features
-        past_features = np.concatenate([dense_past_features, spaced_past_features], axis=0)
+        # Extract spaced past features if applicable
+        if spaced_steps is not None:
+            spaced_past_indices = i + dense_lookback - spaced_steps[::-1]  # Reverse for chronological order
+            spaced_past_features = input_features[spaced_past_indices]
+        else:
+            spaced_past_features = None
 
         # Extract target values for the forecast horizon
         target_slice = target[i + dense_lookback : i + dense_lookback + forecast_horizon]
-
-        # Ensure target slice has the correct length
         if len(target_slice) != forecast_horizon:
-            continue
+            continue  # Skip incomplete slices
 
-        # Extract future features, if specified
+        # Extract future features
         if future_indices is not None:
             future_features = input_features[i + dense_lookback : i + dense_lookback + forecast_horizon, future_indices]
-            # Skip iteration if future_features is incomplete
-            if future_features.shape[0] != forecast_horizon:
-                continue
         else:
-            future_features = np.zeros((forecast_horizon, input_features.shape[1]))  # Placeholder
+            future_features = np.zeros((forecast_horizon, input_features.shape[1]))  # Placeholder if no future features
 
         # Append to the lists
-        past_inputs.append(past_features)
+        dense_past_inputs.append(dense_past_features)
+        if spaced_past_features is not None:
+            spaced_past_inputs.append(spaced_past_features)
         future_inputs.append(future_features)
         outputs.append(target_slice)
 
-    # Convert lists to NumPy arrays
-    past_inputs = np.array(past_inputs)  # Shape: [samples, lookback_steps, features]
-    future_inputs = np.array(future_inputs)  # Shape: [samples, forecast_horizon, future_features]
-    outputs = np.array(outputs)  # Shape: [samples, forecast_horizon, targets]
+    # Convert to NumPy arrays
+    dense_past_inputs = np.array(dense_past_inputs)
+    spaced_past_inputs = np.array(spaced_past_inputs) if spaced_steps is not None else None
+    future_inputs = np.array(future_inputs)
+    outputs = np.array(outputs)
 
-    return past_inputs, future_inputs, outputs
+    return dense_past_inputs, spaced_past_inputs, future_inputs, outputs
 
 
-def create_datasets(features, target, dense_lookback, spaced_lookback, forecast_horizon, future_cols=None, p_train=0.7, p_val=0.2, p_test=0.1):
+def create_datasets(
+    features,
+    target,
+    dense_lookback,
+    spaced_lookback,
+    forecast_horizon,
+    future_cols=None,
+    p_train=0.7,
+    p_val=0.2,
+    p_test=0.1,
+    spaced=True,
+    step_growth_factor=None,
+):
     """
-    Create datasets with dense and spaced lookback for LSTM training.
+    Create datasets with dense and optionally spaced lookback for LSTM training.
     """
     assert len(features) == len(target), "Features and target must have the same length"
 
     hours = len(features)
-
-    # Extract the indices of the future columns
-    if future_cols is not None:
-        future_indices = future_cols
-    else:
-        future_indices = None
+    future_indices = future_cols if future_cols else None
 
     # Set dataset sizes
-    usable_hours = hours - max(dense_lookback, spaced_lookback) - forecast_horizon
+    usable_hours = hours - max(dense_lookback, spaced_lookback if spaced else 0) - forecast_horizon
     num_train = int(usable_hours * p_train)
     num_val = int(usable_hours * p_val)
     num_test = usable_hours - num_train - num_val
 
     # Generate features and labels
-    past_inputs, future_inputs, outputs = create_features(
-        features, target, dense_lookback, spaced_lookback, forecast_horizon, future_indices
+    if spaced:
+        dense_past, spaced_past, future_inputs, outputs = create_features(
+            features,
+            target,
+            dense_lookback,
+            spaced_lookback,
+            forecast_horizon,
+            future_indices,
+            step_growth_factor=step_growth_factor,
+        )
+    else:
+        spaced_past = None
+        dense_past, _, future_inputs, outputs = create_features(
+            features,
+            target,
+            dense_lookback,
+            0,  # No spaced lookback
+            forecast_horizon,
+            future_indices,
+        )
+
+    # Split datasets
+    train_dense = dense_past[:num_train]
+    val_dense = dense_past[num_train : num_train + num_val]
+    test_dense = dense_past[num_train + num_val :]
+
+    if spaced:
+        train_spaced = spaced_past[:num_train]
+        val_spaced = spaced_past[num_train : num_train + num_val]
+        test_spaced = spaced_past[num_train + num_val :]
+    else:
+        train_spaced = val_spaced = test_spaced = None
+
+    train_future = future_inputs[:num_train]
+    val_future = future_inputs[num_train : num_train + num_val]
+    test_future = future_inputs[num_train + num_val :]
+
+    train_targets = outputs[:num_train]
+    val_targets = outputs[num_train : num_train + num_val]
+    test_targets = outputs[num_train + num_val :]
+
+    return (
+        train_dense,
+        train_spaced,
+        train_future,
+        train_targets,
+        val_dense,
+        val_spaced,
+        val_future,
+        val_targets,
+        test_dense,
+        test_spaced,
+        test_future,
+        test_targets,
     )
 
-    # Split into train, val, and test sets
-    train_cutoff = num_train
-    val_cutoff = num_train + num_val
 
-    train_past = past_inputs[:train_cutoff]
-    val_past = past_inputs[train_cutoff:val_cutoff]
-    test_past = past_inputs[val_cutoff:]
-
-    train_future = future_inputs[:train_cutoff]
-    val_future = future_inputs[train_cutoff:val_cutoff]
-    test_future = future_inputs[val_cutoff:]
-
-    train_targets = outputs[:train_cutoff]
-    val_targets = outputs[train_cutoff:val_cutoff]
-    test_targets = outputs[val_cutoff:]
-
-    return train_past, train_future, train_targets, val_past, val_future, val_targets, test_past, test_future, test_targets
-
-
-def prepare_data(file_path, dense_lookback, spaced_lookback, forecast_horizon, future_cols, gas_col, da_col, id_col):
+def prepare_data(
+    file_path,
+    dense_lookback,
+    spaced_lookback,
+    forecast_horizon,
+    future_cols,
+    gas_col,
+    da_col,
+    id_col,
+    spaced=True,
+    step_growth_factor=None,
+):
     """
     Prepare data for forked training with dense and spaced lookback.
-    Args:
-        file_path (str): Path to the CSV file containing the dataset.
-        dense_lookback (int): Number of consecutive timesteps for dense lookback.
-        spaced_lookback (int): Maximum lookback period for spaced lookback.
-        forecast_horizon (int): Number of timesteps to forecast.
-        future_cols (list): Names of future columns.
-        gas_col, da_col, id_col (str): Column names for specific features.
-    Returns:
-        Tuple of train, validation, test datasets and scalers (feature scalers and target scaler).
     """
     # Load and preprocess data
     data = pd.read_csv(file_path)
@@ -249,12 +324,23 @@ def prepare_data(file_path, dense_lookback, spaced_lookback, forecast_horizon, f
     # Scaling preparation
     scale_cols = [da_col, id_col, gas_col]
     scale_indices = [data.columns.get_loc(col) for col in scale_cols]
-
-    # Convert to NumPy array for faster processing
     data = np.array(data)
 
-    # Create past and future datasets with dense and spaced lookback
-    train_past, train_future, train_targets, val_past, val_future, val_targets, test_past, test_future, test_targets = create_datasets(
+    # Create datasets
+    (
+        train_dense_past,
+        train_spaced_past,
+        train_future,
+        train_targets,
+        val_dense_past,
+        val_spaced_past,
+        val_future,
+        val_targets,
+        test_dense_past,
+        test_spaced_past,
+        test_future,
+        test_targets,
+    ) = create_datasets(
         features=data,
         target=output_data,
         dense_lookback=dense_lookback,
@@ -262,54 +348,84 @@ def prepare_data(file_path, dense_lookback, spaced_lookback, forecast_horizon, f
         forecast_horizon=forecast_horizon,
         future_cols=future_indices,
         p_train=0.7,
-        p_val=0.2,
-        p_test=0.1,
+        p_val=0.15,
+        p_test=0.15,
+        spaced=spaced,
+        step_growth_factor=step_growth_factor,
     )
 
     # Initialize scalers for features
     scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in scale_cols}
 
-    # Apply scaling to past features only
+    # Apply scaling
     for col, idx in zip(scale_cols, scale_indices):
-        # Fit the scaler on the training past data (flattened)
-        flat_train_past = train_past[:, :, idx].flatten().reshape(-1, 1)
-        scalers[col].fit(flat_train_past)
+        # Fit scaler on training data
+        flat_train_dense = train_dense_past[:, :, idx].flatten().reshape(-1, 1)
+        scalers[col].fit(flat_train_dense)
 
-        # Transform train, val, and test datasets using the same scaler
-        for dataset in [train_past, val_past, test_past]:
-            dataset[:, :, idx] = scalers[col].transform(
-                dataset[:, :, idx].reshape(-1, 1)
-            ).reshape(dataset.shape[0], dataset.shape[1])
+        # Transform dense past data
+        for dataset in [train_dense_past, val_dense_past, test_dense_past]:
+            dataset[:, :, idx] = scalers[col].transform(dataset[:, :, idx].reshape(-1, 1)).reshape(
+                dataset.shape[0], dataset.shape[1]
+            )
 
-    # Scale the targets (output_data)
+        # If spaced lookback exists, transform spaced past data
+        if spaced:
+            flat_train_spaced = train_spaced_past[:, :, idx].flatten().reshape(-1, 1)
+            scalers[col].fit(flat_train_spaced)
+            for dataset in [train_spaced_past, val_spaced_past, test_spaced_past]:
+                dataset[:, :, idx] = scalers[col].transform(
+                    dataset[:, :, idx].reshape(-1, 1)
+                ).reshape(dataset.shape[0], dataset.shape[1])
+
+    # Scale the targets
     target_scaler = MinMaxScaler(feature_range=(0, 1))
     train_targets = target_scaler.fit_transform(train_targets.reshape(-1, 1)).reshape(train_targets.shape)
     val_targets = target_scaler.transform(val_targets.reshape(-1, 1)).reshape(val_targets.shape)
     test_targets = target_scaler.transform(test_targets.reshape(-1, 1)).reshape(test_targets.shape)
 
-    # Convert datasets to PyTorch tensors 32
-    train_past = torch.tensor(train_past, dtype=torch.float32)
+    # Convert to tensors
+    train_dense_past = torch.tensor(train_dense_past, dtype=torch.float32)
+    val_dense_past = torch.tensor(val_dense_past, dtype=torch.float32)
+    test_dense_past = torch.tensor(test_dense_past, dtype=torch.float32)
     train_future = torch.tensor(train_future, dtype=torch.float32)
-    train_targets = torch.tensor(train_targets, dtype=torch.float32)
-
-    val_past = torch.tensor(val_past, dtype=torch.float32)
     val_future = torch.tensor(val_future, dtype=torch.float32)
-    val_targets = torch.tensor(val_targets, dtype=torch.float32)
-
-    test_past = torch.tensor(test_past, dtype=torch.float32)
     test_future = torch.tensor(test_future, dtype=torch.float32)
+    train_targets = torch.tensor(train_targets, dtype=torch.float32)
+    val_targets = torch.tensor(val_targets, dtype=torch.float32)
     test_targets = torch.tensor(test_targets, dtype=torch.float32)
 
-    # Return datasets and scalers
-    return (
-        train_past,
-        train_future,
-        train_targets,
-        val_past,
-        val_future,
-        val_targets,
-        test_past,
-        test_future,
-        test_targets,
-        target_scaler,
-    )
+    if spaced:
+        train_spaced_past = torch.tensor(train_spaced_past, dtype=torch.float32)
+        val_spaced_past = torch.tensor(val_spaced_past, dtype=torch.float32)
+        test_spaced_past = torch.tensor(test_spaced_past, dtype=torch.float32)
+        return (
+            train_dense_past,
+            train_spaced_past,
+            train_future,
+            train_targets,
+            val_dense_past,
+            val_spaced_past,
+            val_future,
+            val_targets,
+            test_dense_past,
+            test_spaced_past,
+            test_future,
+            test_targets,
+            target_scaler,
+        )
+    else:
+        return (
+            train_dense_past,
+            train_future,
+            train_targets,
+            val_dense_past,
+            val_future,
+            val_targets,
+            test_dense_past,
+            test_future,
+            test_targets,
+            target_scaler,
+        )
+
+

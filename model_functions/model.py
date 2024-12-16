@@ -191,3 +191,111 @@ class TemporalAttention(nn.Module):
         # Compute context vector
         context = torch.sum(lstm_outputs * attn_weights.unsqueeze(-1), dim=1)  # [batch, hidden_size]
         return context, attn_weights
+    
+
+class SpacedLSTM(nn.Module):
+    def __init__(self, 
+                 dense_input_size, 
+                 spaced_input_size, 
+                 future_input_size, 
+                 hidden_size, 
+                 num_layers, 
+                 dropout, 
+                 dense_horizons, 
+                 spaced_horizons, 
+                 forecast_horizon, 
+                 quantiles):
+        super().__init__()
+        self.dense_horizons = dense_horizons
+        self.spaced_horizons = spaced_horizons
+        self.forecast_horizon = forecast_horizon
+        self.hidden_size = hidden_size
+        self.quantiles = quantiles
+
+        # LSTM Encoder for dense past data
+        self.encoder_dense = nn.LSTM(
+            input_size=dense_input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        # LSTM Encoder for spaced past data
+        self.encoder_spaced = nn.LSTM(
+            input_size=spaced_input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        # LSTM Decoder for future data
+        self.decoder = nn.LSTM(
+            input_size=future_input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        # Output layers for quantiles
+        self.quantile_heads = nn.ModuleList([
+            nn.Linear(hidden_size, forecast_horizon) for _ in range(len(quantiles))
+        ])
+
+        # Fusion layer to combine encoder outputs
+        self.fusion_layer = nn.Linear(hidden_size * 2, hidden_size)
+
+        # Initialize weights
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LSTM):
+            for name, param in m.named_parameters():
+                if "weight_ih" in name:
+                    nn.init.xavier_uniform_(param.data)
+                elif "weight_hh" in name:
+                    nn.init.orthogonal_(param.data)
+                elif "bias" in name:
+                    nn.init.zeros_(param.data)
+
+    def forward(self, x_dense, x_spaced, x_future):
+        """
+        Forward pass for the model.
+        Args:
+        - x_dense: Tensor [batch_size, dense_horizons, dense_input_size]
+        - x_spaced: Tensor [batch_size, spaced_horizons, spaced_input_size]
+        - x_future: Tensor [batch_size, forecast_horizon, future_input_size]
+        Returns:
+        - quantile_forecasts: Tensor [batch_size, len(quantiles), forecast_horizon]
+        """
+        batch_size = x_dense.size(0)
+
+        # Encode dense input
+        _, (hidden_dense, cell_dense) = self.encoder_dense(x_dense)
+
+        # Encode spaced input
+        _, (hidden_spaced, cell_spaced) = self.encoder_spaced(x_spaced)
+
+        # Combine hidden states using the fusion layer
+        combined_hidden = torch.cat((hidden_dense[-1], hidden_spaced[-1]), dim=1)  # Combine last layers
+        combined_hidden = self.fusion_layer(combined_hidden)  # Fuse to a single hidden size
+        combined_hidden = combined_hidden.unsqueeze(0).repeat(self.decoder.num_layers, 1, 1)  # Repeat for decoder layers
+
+        # Initialize decoder with the combined hidden state and zero cell state
+        decoder_output, _ = self.decoder(x_future, (combined_hidden, torch.zeros_like(combined_hidden)))
+
+        # Predict quantiles using separate output heads
+        quantile_forecasts = []
+        for quantile_head in self.quantile_heads:
+            quantile_forecasts.append(quantile_head(decoder_output[:, -1, :]))  # Use last decoder timestep
+
+        # Stack quantile forecasts
+        quantile_forecasts = torch.stack(quantile_forecasts, dim=1)  # [batch_size, len(quantiles), forecast_horizon]
+
+        return quantile_forecasts
