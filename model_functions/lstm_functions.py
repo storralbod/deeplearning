@@ -22,14 +22,7 @@ def quantile_loss(y, y_hat, quantiles):
         errors = y - y_hat[:, i, :].unsqueeze(1)  # [batch_size, 1, forecast_horizon]
         losses.append(torch.max(q * errors, (q - 1) * errors).mean())
 
-    # Enforce quantile ordering: Q[i] <= Q[i+1]
-    ordering_penalty = 0
-    for i in range(len(quantiles) - 1):
-        ordering_penalty += torch.mean(torch.relu(y_hat[:, i, :] - y_hat[:, i + 1, :]))
-
-    return torch.mean(torch.stack(losses)) + 0.5 * ordering_penalty
-
-
+    return torch.mean(torch.stack(losses))
 
 def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon, device, spaced=False):
     """
@@ -88,29 +81,47 @@ def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon
 
     return forecast_inv, true_inv
 
-# Plot Forecasts
-def plot_forecasts(forecasts, true_values, sample_idx, quantiles, forecast_horizon):
+def plot_forecasts(forecasts, true_values, quantiles, forecast_horizon):
     """
-    Visualizes the forecasts vs. true values for a single sample.
+    Visualizes the best and worst forecasts vs. true values based on RMSE.
+    Args:
+        forecasts (ndarray): Predicted values of shape [num_samples, num_quantiles, forecast_horizon].
+        true_values (ndarray): True values of shape [num_samples, forecast_horizon].
+        quantiles (list): List of quantiles corresponding to forecasts.
+        forecast_horizon (int): Number of timesteps in the forecast horizon.
     """
-    q_10, q_50, q_90 = forecasts[sample_idx, 0, :], forecasts[sample_idx, 1, :], forecasts[sample_idx, 2, :]
-    true_vals = true_values[sample_idx, :]
-    time_steps = np.arange(forecast_horizon)
-
-    plt.figure(figsize=(12, 6))
-    plt.fill_between(
-        time_steps,
-        q_10,
-        q_90,
-        color="gray",
-        alpha=0.3,
-        label=f"{quantiles[0]} - {quantiles[2]} Quantile Range",
-    )
-    plt.plot(time_steps, q_50, label=f"{quantiles[1]} Quantile (Median)", color="blue", linewidth=2)
-    plt.plot(time_steps, true_vals, label="True Values", color="black", linestyle="--", linewidth=2)
-    plt.title("Quantile Forecasts vs True Values")
-    plt.xlabel("Time Step")
-    plt.ylabel("DA Value")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+    # Compute RMSE for each sample
+    rmse = np.sqrt(np.mean((forecasts[:, 1, :] - true_values) ** 2, axis=1))  # Median forecast (quantile[1])
+    
+    # Identify best and worst samples
+    best_idx = np.argmin(rmse)
+    worst_idx = np.argmax(rmse)
+    
+    def plot_single_forecast(sample_idx, title):
+        q_10, q_50, q_90 = forecasts[sample_idx, 0, :], forecasts[sample_idx, 1, :], forecasts[sample_idx, 2, :]
+        true_vals = true_values[sample_idx, :]
+        time_steps = np.arange(forecast_horizon)
+        
+        plt.figure(figsize=(12, 6))
+        plt.fill_between(
+            time_steps,
+            q_10,
+            q_90,
+            color="gray",
+            alpha=0.3,
+            label=f"{quantiles[0]} - {quantiles[2]} Quantile Range",
+        )
+        plt.plot(time_steps, q_50, label=f"{quantiles[1]} Quantile (Median)", color="blue", linewidth=2)
+        plt.plot(time_steps, true_vals, label="True Values", color="black", linestyle="--", linewidth=2)
+        plt.title(title)
+        plt.xlabel("Time Step")
+        plt.ylabel("DA Value")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+    
+    # Plot best prediction
+    plot_single_forecast(best_idx, f"Best Prediction (RMSE: {rmse[best_idx]:.4f})")
+    
+    # Plot worst prediction
+    plot_single_forecast(worst_idx, f"Worst Prediction (RMSE: {rmse[worst_idx]:.4f})")

@@ -191,7 +191,6 @@ class TemporalAttention(nn.Module):
         # Compute context vector
         context = torch.sum(lstm_outputs * attn_weights.unsqueeze(-1), dim=1)  # [batch, hidden_size]
         return context, attn_weights
-    
 
 class SpacedLSTM(nn.Module):
     def __init__(self, 
@@ -212,40 +211,60 @@ class SpacedLSTM(nn.Module):
         self.hidden_size = hidden_size
         self.quantiles = quantiles
 
-        # LSTM Encoder for dense past data
+        # LSTM Encoder for dense past data (not bidirectional)
         self.encoder_dense = nn.LSTM(
             input_size=dense_input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
         )
 
-        # LSTM Encoder for spaced past data
+        # LSTM Encoder for spaced past data (not bidirectional)
         self.encoder_spaced = nn.LSTM(
             input_size=spaced_input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
         )
 
-        # LSTM Decoder for future data
+        # Bidirectional LSTM Decoder for future data
         self.decoder = nn.LSTM(
             input_size=future_input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
+            bidirectional=True
+        )
+
+        # Fusion layer to combine encoder outputs
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(hidden_size * 2, hidden_size * 2),  # Combine both encoders' outputs
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size * 2, hidden_size),  # Match decoder input size
+            nn.ReLU()
+        )
+
+        # More complex MLP to process decoder outputs
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size * 2, hidden_size * 4),  # Bidirectional decoder output
+            nn.ReLU(),
+            nn.LayerNorm(hidden_size * 4),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size * 4, hidden_size * 3),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_size * 3),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size * 3, forecast_horizon)  # Output matches forecast_horizon
         )
 
         # Output layers for quantiles
         self.quantile_heads = nn.ModuleList([
-            nn.Linear(hidden_size, forecast_horizon) for _ in range(len(quantiles))
+            nn.Linear(forecast_horizon, forecast_horizon) for _ in range(len(quantiles))
         ])
-
-        # Fusion layer to combine encoder outputs
-        self.fusion_layer = nn.Linear(hidden_size * 2, hidden_size)
 
         # Initialize weights
         self.apply(self._init_weights)
@@ -262,7 +281,9 @@ class SpacedLSTM(nn.Module):
                 elif "weight_hh" in name:
                     nn.init.orthogonal_(param.data)
                 elif "bias" in name:
-                    nn.init.zeros_(param.data)
+                    param.data.fill_(0)
+                    n = param.size(0)
+                    param.data[n // 4 : n // 2] = 1.0  # Set forget gate bias to 1
 
     def forward(self, x_dense, x_spaced, x_future):
         """
@@ -277,25 +298,33 @@ class SpacedLSTM(nn.Module):
         batch_size = x_dense.size(0)
 
         # Encode dense input
-        _, (hidden_dense, cell_dense) = self.encoder_dense(x_dense)
+        _, (hidden_dense, _) = self.encoder_dense(x_dense)  # hidden_dense: [num_layers, batch_size, hidden_size]
 
         # Encode spaced input
-        _, (hidden_spaced, cell_spaced) = self.encoder_spaced(x_spaced)
+        _, (hidden_spaced, _) = self.encoder_spaced(x_spaced)  # hidden_spaced: [num_layers, batch_size, hidden_size]
 
-        # Combine hidden states using the fusion layer
-        combined_hidden = torch.cat((hidden_dense[-1], hidden_spaced[-1]), dim=1)  # Combine last layers
-        combined_hidden = self.fusion_layer(combined_hidden)  # Fuse to a single hidden size
-        combined_hidden = combined_hidden.unsqueeze(0).repeat(self.decoder.num_layers, 1, 1)  # Repeat for decoder layers
+        # Combine last hidden states from both encoders
+        combined_hidden = torch.cat((hidden_dense[-1], hidden_spaced[-1]), dim=1)  # [batch_size, hidden_size * 2]
+        combined_hidden = self.fusion_layer(combined_hidden)  # [batch_size, hidden_size]
 
-        # Initialize decoder with the combined hidden state and zero cell state
-        decoder_output, _ = self.decoder(x_future, (combined_hidden, torch.zeros_like(combined_hidden)))
+        # Expand combined_hidden to match the decoder's required hidden size
+        combined_hidden = combined_hidden.unsqueeze(0).repeat(self.decoder.num_layers * 2, 1, 1)  # Bidirectional decoder
+        decoder_cell = torch.zeros_like(combined_hidden)  # Zero-initialized cell state
+
+        # Pass future inputs through the decoder
+        decoder_output, _ = self.decoder(x_future, (combined_hidden, decoder_cell))  # decoder_output: [batch_size, seq_len, hidden_size * 2]
+
+        # Process decoder output through the MLP
+        mlp_output = self.mlp(decoder_output[:, -1, :])  # Use last timestep of decoder output [batch_size, forecast_horizon]
 
         # Predict quantiles using separate output heads
         quantile_forecasts = []
         for quantile_head in self.quantile_heads:
-            quantile_forecasts.append(quantile_head(decoder_output[:, -1, :]))  # Use last decoder timestep
+            quantile_forecasts.append(quantile_head(mlp_output))  # [batch_size, forecast_horizon]
 
         # Stack quantile forecasts
         quantile_forecasts = torch.stack(quantile_forecasts, dim=1)  # [batch_size, len(quantiles), forecast_horizon]
 
         return quantile_forecasts
+
+

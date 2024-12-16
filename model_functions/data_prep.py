@@ -303,30 +303,39 @@ def prepare_data(
     spaced_lookback,
     forecast_horizon,
     future_cols,
-    gas_col,
-    da_col,
-    id_col,
+    target_col,
     spaced=True,
     step_growth_factor=None,
 ):
     """
     Prepare data for forked training with dense and spaced lookback.
+    Scales all features except sine/cosine temporal columns and explicitly dropped columns.
+    Args:
+        file_path (str): Path to the CSV file containing the dataset.
+        dense_lookback (int): Number of consecutive timesteps for dense lookback.
+        spaced_lookback (int): Maximum lookback period for spaced lookback.
+        forecast_horizon (int): Number of timesteps to forecast.
+        future_cols (list): Names of future columns.
+        target_col (str): Name of the target column.
+        spaced (bool): Whether to include spaced lookback features.
+        step_growth_factor (float): Factor for dynamic spacing of spaced lookback.
+    Returns:
+        Scaled datasets (train, val, test) and scalers.
     """
     # Load and preprocess data
     data = pd.read_csv(file_path)
+    data = data.drop(columns=["Year", "Month", "Day", "Hour", "Year_Scaled", "Volume_MWh", "Diff"])
     data = data.dropna().reset_index(drop=True)
-    data = data.drop(columns=["Volume_MWh", "Diff", "Year", "Month", "Day", "Hour"])
 
-    # Prepare target and feature indices
-    output_data = np.array(data.loc[:, da_col]).reshape(-1, 1)
+    # Identify columns to exclude from scaling
+    exclude_from_scaling = ["Hour_Sin", "Hour_Cos", "Day_Sin", "Day_Cos", "Month_Sin", "Month_Cos"]
+
+    # Separate features and target
+    output_data = np.array(data.loc[:, target_col]).reshape(-1, 1)
     future_indices = [data.columns.get_loc(col) for col in future_cols]
+    feature_cols = [col for col in data.columns if col not in exclude_from_scaling and col != target_col]
 
-    # Scaling preparation
-    scale_cols = [da_col, id_col, gas_col]
-    scale_indices = [data.columns.get_loc(col) for col in scale_cols]
-    data = np.array(data)
-
-    # Create datasets
+    # Prepare datasets
     (
         train_dense_past,
         train_spaced_past,
@@ -341,7 +350,7 @@ def prepare_data(
         test_future,
         test_targets,
     ) = create_datasets(
-        features=data,
+        features=data.to_numpy(),
         target=output_data,
         dense_lookback=dense_lookback,
         spaced_lookback=spaced_lookback,
@@ -355,36 +364,39 @@ def prepare_data(
     )
 
     # Initialize scalers for features
-    scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in scale_cols}
+    scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in feature_cols}
 
     # Apply scaling
-    for col, idx in zip(scale_cols, scale_indices):
-        # Fit scaler on training data
-        flat_train_dense = train_dense_past[:, :, idx].flatten().reshape(-1, 1)
+    for col in feature_cols:
+        col_idx = data.columns.get_loc(col)
+
+        # Fit scaler on training dense past data
+        flat_train_dense = train_dense_past[:, :, col_idx].flatten().reshape(-1, 1)
         scalers[col].fit(flat_train_dense)
 
         # Transform dense past data
         for dataset in [train_dense_past, val_dense_past, test_dense_past]:
-            dataset[:, :, idx] = scalers[col].transform(dataset[:, :, idx].reshape(-1, 1)).reshape(
-                dataset.shape[0], dataset.shape[1]
-            )
+            dataset[:, :, col_idx] = scalers[col].transform(
+                dataset[:, :, col_idx].reshape(-1, 1)
+            ).reshape(dataset.shape[0], dataset.shape[1])
 
         # If spaced lookback exists, transform spaced past data
         if spaced:
-            flat_train_spaced = train_spaced_past[:, :, idx].flatten().reshape(-1, 1)
-            scalers[col].fit(flat_train_spaced)
+            past_scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in feature_cols}
+            flat_train_spaced = train_spaced_past[:, :, col_idx].flatten().reshape(-1, 1)
+            past_scalers[col].fit(flat_train_spaced)
             for dataset in [train_spaced_past, val_spaced_past, test_spaced_past]:
-                dataset[:, :, idx] = scalers[col].transform(
-                    dataset[:, :, idx].reshape(-1, 1)
+                dataset[:, :, col_idx] = past_scalers[col].transform(
+                    dataset[:, :, col_idx].reshape(-1, 1)
                 ).reshape(dataset.shape[0], dataset.shape[1])
 
-    # Scale the targets
+    # Scale the target column
     target_scaler = MinMaxScaler(feature_range=(0, 1))
     train_targets = target_scaler.fit_transform(train_targets.reshape(-1, 1)).reshape(train_targets.shape)
     val_targets = target_scaler.transform(val_targets.reshape(-1, 1)).reshape(val_targets.shape)
     test_targets = target_scaler.transform(test_targets.reshape(-1, 1)).reshape(test_targets.shape)
 
-    # Convert to tensors
+    # Convert datasets to PyTorch tensors
     train_dense_past = torch.tensor(train_dense_past, dtype=torch.float32)
     val_dense_past = torch.tensor(val_dense_past, dtype=torch.float32)
     test_dense_past = torch.tensor(test_dense_past, dtype=torch.float32)
@@ -427,5 +439,3 @@ def prepare_data(
             test_targets,
             target_scaler,
         )
-
-
