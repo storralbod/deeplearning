@@ -3,6 +3,7 @@ import numpy as np
 import glob
 import torch
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.decomposition import PCA
 from torch.utils.data import Dataset
 
 # Function to encode time (day, month, hour) as sine and cosine
@@ -306,7 +307,8 @@ def prepare_data(
     target_col,
     spaced=True,
     step_growth_factor=None,
-):
+    pca=True
+    ):
     """
     Prepare data for forked training with dense and spaced lookback.
     Scales all features except sine/cosine temporal columns and explicitly dropped columns.
@@ -334,6 +336,7 @@ def prepare_data(
     output_data = np.array(data.loc[:, target_col]).reshape(-1, 1)
     future_indices = [data.columns.get_loc(col) for col in future_cols]
     feature_cols = [col for col in data.columns if col not in exclude_from_scaling and col != target_col]
+    n_components = len(feature_cols)
 
     # Prepare datasets
     (
@@ -395,6 +398,35 @@ def prepare_data(
     train_targets = target_scaler.fit_transform(train_targets.reshape(-1, 1)).reshape(train_targets.shape)
     val_targets = target_scaler.transform(val_targets.reshape(-1, 1)).reshape(val_targets.shape)
     test_targets = target_scaler.transform(test_targets.reshape(-1, 1)).reshape(test_targets.shape)
+
+    # Apply PCA 
+    if pca:
+        # Reshape dense past data
+        n_timesteps, n_features = train_dense_past.shape[1], train_dense_past.shape[2]
+        train_dense_reshaped = train_dense_past.reshape(-1, n_features)
+        val_dense_reshaped = val_dense_past.reshape(-1, n_features)
+        test_dense_reshaped = test_dense_past.reshape(-1, n_features)
+
+        # Apply PCA 
+        pca_model = PCA(n_components=min(n_features, n_components))
+        pca_model.fit(train_dense_reshaped)
+
+        # Transform datasets
+        train_dense_pca = pca_model.transform(train_dense_reshaped).reshape(
+            train_dense_past.shape[0], n_timesteps, -1
+        )
+        val_dense_pca = pca_model.transform(val_dense_reshaped).reshape(
+            val_dense_past.shape[0], n_timesteps, -1
+        )
+        test_dense_pca = pca_model.transform(test_dense_reshaped).reshape(
+            test_dense_past.shape[0], n_timesteps, -1
+        )
+
+        # Replace dense past datasets
+        train_dense_past = torch.tensor(train_dense_pca, dtype=torch.float32)
+        val_dense_past = torch.tensor(val_dense_pca, dtype=torch.float32)
+        test_dense_past = torch.tensor(test_dense_pca, dtype=torch.float32)
+
 
     # Convert datasets to PyTorch tensors
     train_dense_past = torch.tensor(train_dense_past, dtype=torch.float32)
