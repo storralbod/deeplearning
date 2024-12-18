@@ -237,10 +237,13 @@ def create_datasets(
 
     # Set dataset sizes
     usable_hours = hours - max(dense_lookback, spaced_lookback if spaced else 0) - forecast_horizon
+    print("usable_hours:", usable_hours)
     num_train = int(usable_hours * p_train)
     num_val = int(usable_hours * p_val)
     num_test = usable_hours - num_train - num_val
 
+    if spaced_lookback > len(features) - dense_lookback - forecast_horizon:
+        spaced_lookback = len(features) - dense_lookback - forecast_horizon
     # Generate features and labels
     if spaced:
         dense_past, spaced_past, future_inputs, outputs = create_features(
@@ -366,7 +369,12 @@ def prepare_data(
     # Load and preprocess data
     data = pd.read_csv(file_path)
     data = data.drop(columns=["Year", "Month", "Day", "Hour", "Year_Scaled", "Volume_MWh", "Diff"])
-    data = data.dropna().reset_index(drop=True)
+
+    # Drop only all-NaN rows
+    data = data.dropna(how="all")
+    data.ffill(inplace=True)
+
+    # Identify columns to exclude from scaling
     exclude_from_scaling = ["Hour_Sin", "Hour_Cos", "Day_Sin", "Day_Cos", "Month_Sin", "Month_Cos"]
     # Separate features and target
     output_data = np.array(data.loc[:, target_col]).reshape(-1, 1)
@@ -403,6 +411,22 @@ def prepare_data(
 
     # Initialize scalers for features
     scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in feature_cols}
+
+
+    print("train:", train_dense_past.shape)
+    print("test:", test_dense_past.shape)
+    print("val:", val_dense_past.shape)
+    print("train_targets:", train_targets.shape)
+    print("test_targets:", test_targets.shape)
+    print("val_targets:", val_targets.shape)
+    print("train_future:", train_future.shape)
+    print("test_future:", test_future.shape)
+    print("val_future:", val_future.shape)
+    if train_spaced_past is not None:
+        print("train_spaced_past:", train_spaced_past.shape)
+        print("test_spaced_past:", test_spaced_past.shape)
+        print("val_spaced_past:", val_spaced_past.shape)
+
 
     # Apply scaling
     for col in feature_cols:
