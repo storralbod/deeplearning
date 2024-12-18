@@ -3,7 +3,9 @@ import numpy as np
 import glob
 import torch
 from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import Dataset
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
 
 # Function to encode time (day, month, hour) as sine and cosine
 def encode_time(value, max_value):
@@ -223,7 +225,7 @@ def create_datasets(
     p_val=0.2,
     p_test=0.1,
     spaced=True,
-    step_growth_factor=None,
+    step_growth_factor=None
 ):
     """
     Create datasets with dense and optionally spaced lookback for LSTM training.
@@ -235,10 +237,13 @@ def create_datasets(
 
     # Set dataset sizes
     usable_hours = hours - max(dense_lookback, spaced_lookback if spaced else 0) - forecast_horizon
+    print("usable_hours:", usable_hours)
     num_train = int(usable_hours * p_train)
     num_val = int(usable_hours * p_val)
     num_test = usable_hours - num_train - num_val
 
+    if spaced_lookback > len(features) - dense_lookback - forecast_horizon:
+        spaced_lookback = len(features) - dense_lookback - forecast_horizon
     # Generate features and labels
     if spaced:
         dense_past, spaced_past, future_inputs, outputs = create_features(
@@ -297,6 +302,44 @@ def create_datasets(
     )
 
 
+def perform_pca(dataframe, target_col=None, exclude_cols=None, variance_threshold=0.01):
+
+    # Exclude target and other specified columns
+    exclude_cols = exclude_cols or []
+    if target_col:
+        exclude_cols.append(target_col)
+    feature_cols = [col for col in dataframe.columns if col not in exclude_cols]
+    
+    # Convert to NumPy array
+    feature_data = dataframe[feature_cols].to_numpy()
+
+    # Scale data
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(feature_data)
+
+    # Perform PCA
+    pca_model = PCA()
+    pca_data = pca_model.fit_transform(scaled_data)
+
+    # Explained variance
+    explained_variance_ratio = pca_model.explained_variance_ratio_
+    cumulative_variance = np.cumsum(explained_variance_ratio)
+
+    # Find number of components above the variance threshold
+    components_above_threshold = np.where(explained_variance_ratio >= variance_threshold)[0]
+    optimal_components = len(components_above_threshold)
+
+    # Output results
+    return {
+        "pca_model": pca_model,
+        "scaled_data": scaled_data,
+        "pca_data": pca_data,
+        "explained_variance_ratio": explained_variance_ratio,
+        "cumulative_variance": cumulative_variance,
+        "optimal_components": optimal_components,
+    }
+
+
 def prepare_data(
     file_path,
     dense_lookback,
@@ -306,7 +349,8 @@ def prepare_data(
     target_col,
     spaced=True,
     step_growth_factor=None,
-):
+    pca=True
+    ):
     """
     Prepare data for forked training with dense and spaced lookback.
     Scales all features except sine/cosine temporal columns and explicitly dropped columns.
@@ -325,11 +369,14 @@ def prepare_data(
     # Load and preprocess data
     data = pd.read_csv(file_path)
     data = data.drop(columns=["Year", "Month", "Day", "Hour", "Year_Scaled", "Volume_MWh", "Diff"])
-    data = data.dropna().reset_index(drop=True)
+
+    # Drop only all-NaN rows
+    data = data.dropna(how="all")
+    data.ffill(inplace=True)
+    data.bfill(inplace=True)
 
     # Identify columns to exclude from scaling
     exclude_from_scaling = ["Hour_Sin", "Hour_Cos", "Day_Sin", "Day_Cos", "Month_Sin", "Month_Cos"]
-
     # Separate features and target
     output_data = np.array(data.loc[:, target_col]).reshape(-1, 1)
     future_indices = [data.columns.get_loc(col) for col in future_cols]
@@ -366,6 +413,22 @@ def prepare_data(
     # Initialize scalers for features
     scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in feature_cols}
 
+
+    print("train:", train_dense_past.shape)
+    print("test:", test_dense_past.shape)
+    print("val:", val_dense_past.shape)
+    print("train_targets:", train_targets.shape)
+    print("test_targets:", test_targets.shape)
+    print("val_targets:", val_targets.shape)
+    print("train_future:", train_future.shape)
+    print("test_future:", test_future.shape)
+    print("val_future:", val_future.shape)
+    if train_spaced_past is not None:
+        print("train_spaced_past:", train_spaced_past.shape)
+        print("test_spaced_past:", test_spaced_past.shape)
+        print("val_spaced_past:", val_spaced_past.shape)
+
+
     # Apply scaling
     for col in feature_cols:
         col_idx = data.columns.get_loc(col)
@@ -395,6 +458,11 @@ def prepare_data(
     train_targets = target_scaler.fit_transform(train_targets.reshape(-1, 1)).reshape(train_targets.shape)
     val_targets = target_scaler.transform(val_targets.reshape(-1, 1)).reshape(val_targets.shape)
     test_targets = target_scaler.transform(test_targets.reshape(-1, 1)).reshape(test_targets.shape)
+
+    # Apply PCA 
+    if pca:
+        pca_dict = perform_pca(dataframe=data, target_col="DA")
+        print(pca_dict)
 
     # Convert datasets to PyTorch tensors
     train_dense_past = torch.tensor(train_dense_past, dtype=torch.float32)
