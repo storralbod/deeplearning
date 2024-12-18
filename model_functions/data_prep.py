@@ -3,10 +3,9 @@ import numpy as np
 import glob
 import torch
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from torch.utils.data import Dataset
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 # Function to encode time (day, month, hour) as sine and cosine
 def encode_time(value, max_value):
@@ -300,6 +299,44 @@ def create_datasets(
     )
 
 
+def perform_pca(dataframe, target_col=None, exclude_cols=None, variance_threshold=0.01):
+
+    # Exclude target and other specified columns
+    exclude_cols = exclude_cols or []
+    if target_col:
+        exclude_cols.append(target_col)
+    feature_cols = [col for col in dataframe.columns if col not in exclude_cols]
+    
+    # Convert to NumPy array
+    feature_data = dataframe[feature_cols].to_numpy()
+
+    # Scale data
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(feature_data)
+
+    # Perform PCA
+    pca_model = PCA()
+    pca_data = pca_model.fit_transform(scaled_data)
+
+    # Explained variance
+    explained_variance_ratio = pca_model.explained_variance_ratio_
+    cumulative_variance = np.cumsum(explained_variance_ratio)
+
+    # Find number of components above the variance threshold
+    components_above_threshold = np.where(explained_variance_ratio >= variance_threshold)[0]
+    optimal_components = len(components_above_threshold)
+
+    # Output results
+    return {
+        "pca_model": pca_model,
+        "scaled_data": scaled_data,
+        "pca_data": pca_data,
+        "explained_variance_ratio": explained_variance_ratio,
+        "cumulative_variance": cumulative_variance,
+        "optimal_components": optimal_components,
+    }
+
+
 def prepare_data(
     file_path,
     dense_lookback,
@@ -330,12 +367,7 @@ def prepare_data(
     data = pd.read_csv(file_path)
     data = data.drop(columns=["Year", "Month", "Day", "Hour", "Year_Scaled", "Volume_MWh", "Diff"])
     data = data.dropna().reset_index(drop=True)
-
-    # Identify columns to exclude from scaling
-    exclude_from_scaling = []
-    # exclude_from_scaling = ["Hour_Sin", "Hour_Cos", "Day_Sin", "Day_Cos", "Month_Sin", "Month_Cos"]
-
-
+    exclude_from_scaling = ["Hour_Sin", "Hour_Cos", "Day_Sin", "Day_Cos", "Month_Sin", "Month_Cos"]
     # Separate features and target
     output_data = np.array(data.loc[:, target_col]).reshape(-1, 1)
     future_indices = [data.columns.get_loc(col) for col in future_cols]
@@ -402,50 +434,10 @@ def prepare_data(
     val_targets = target_scaler.transform(val_targets.reshape(-1, 1)).reshape(val_targets.shape)
     test_targets = target_scaler.transform(test_targets.reshape(-1, 1)).reshape(test_targets.shape)
 
-    print(train_targets)
-    print(val_targets)
-
     # Apply PCA 
     if pca:
-        # Reshape dense past data
-        n_timesteps, n_features = train_dense_past.shape[1], train_dense_past.shape[2]
-        train_dense_reshaped = train_dense_past.reshape(-1, n_features)
-        val_dense_reshaped = val_dense_past.reshape(-1, n_features)
-        test_dense_reshaped = test_dense_past.reshape(-1, n_features)
-
-        # Apply PCA 
-        pca_model = PCA()
-        pca_model.fit(train_dense_reshaped)
-
-        explained_variance_ratio = pca_model.explained_variance_ratio_
-        cumulative_explained_variance = np.cumsum(explained_variance_ratio)
-
-        # Select components that explain at least 1% of variance
-        components_above_threshold = np.where(explained_variance_ratio >= 0.01)[0]
-        optimal_components = len(components_above_threshold)
-
-        print(f"Number of components explaining ≥1% variance: {optimal_components}")
-        print(f"Total variance explained: {cumulative_explained_variance[optimal_components-1]:.4f}")
-
-        pca_model = PCA(n_components=optimal_components)
-        pca_model.fit(train_dense_reshaped)  # Fit PCA on the training data
-
-        # Transform datasets
-        train_dense_pca = pca_model.transform(train_dense_reshaped).reshape(
-            train_dense_past.shape[0], n_timesteps, -1
-        )
-        val_dense_pca = pca_model.transform(val_dense_reshaped).reshape(
-            val_dense_past.shape[0], n_timesteps, -1
-        )
-        test_dense_pca = pca_model.transform(test_dense_reshaped).reshape(
-            test_dense_past.shape[0], n_timesteps, -1
-        )
-
-        # Replace dense past datasets
-        train_dense_past = torch.tensor(train_dense_pca, dtype=torch.float32)
-        val_dense_past = torch.tensor(val_dense_pca, dtype=torch.float32)
-        test_dense_past = torch.tensor(test_dense_pca, dtype=torch.float32)
-
+        pca_dict = perform_pca(dataframe=data, target_col="DA")
+        print(pca_dict)
 
     # Convert datasets to PyTorch tensors
     train_dense_past = torch.tensor(train_dense_past, dtype=torch.float32)
