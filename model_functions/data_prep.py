@@ -331,6 +331,7 @@ def prepare_data(
     # Drop only all-NaN rows
     data = data.dropna(how="all")
     data.ffill(inplace=True)
+    data.bfill(inplace=True)
 
     # Identify columns to exclude from scaling
     exclude_from_scaling = ["Hour_Sin", "Hour_Cos", "Day_Sin", "Day_Cos", "Month_Sin", "Month_Cos"]
