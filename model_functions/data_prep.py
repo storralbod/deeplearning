@@ -3,7 +3,9 @@ import numpy as np
 import glob
 import torch
 from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import Dataset
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
 
 # Function to encode time (day, month, hour) as sine and cosine
 def encode_time(value, max_value):
@@ -223,7 +225,7 @@ def create_datasets(
     p_val=0.2,
     p_test=0.1,
     spaced=True,
-    step_growth_factor=None,
+    step_growth_factor=None
 ):
     """
     Create datasets with dense and optionally spaced lookback for LSTM training.
@@ -300,6 +302,44 @@ def create_datasets(
     )
 
 
+def perform_pca(dataframe, target_col=None, exclude_cols=None, variance_threshold=0.01):
+
+    # Exclude target and other specified columns
+    exclude_cols = exclude_cols or []
+    if target_col:
+        exclude_cols.append(target_col)
+    feature_cols = [col for col in dataframe.columns if col not in exclude_cols]
+    
+    # Convert to NumPy array
+    feature_data = dataframe[feature_cols].to_numpy()
+
+    # Scale data
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(feature_data)
+
+    # Perform PCA
+    pca_model = PCA()
+    pca_data = pca_model.fit_transform(scaled_data)
+
+    # Explained variance
+    explained_variance_ratio = pca_model.explained_variance_ratio_
+    cumulative_variance = np.cumsum(explained_variance_ratio)
+
+    # Find number of components above the variance threshold
+    components_above_threshold = np.where(explained_variance_ratio >= variance_threshold)[0]
+    optimal_components = len(components_above_threshold)
+
+    # Output results
+    return {
+        "pca_model": pca_model,
+        "scaled_data": scaled_data,
+        "pca_data": pca_data,
+        "explained_variance_ratio": explained_variance_ratio,
+        "cumulative_variance": cumulative_variance,
+        "optimal_components": optimal_components,
+    }
+
+
 def prepare_data(
     file_path,
     dense_lookback,
@@ -309,7 +349,8 @@ def prepare_data(
     target_col,
     spaced=True,
     step_growth_factor=None,
-):
+    pca=True
+    ):
     """
     Prepare data for forked training with dense and spaced lookback.
     Scales all features except sine/cosine temporal columns and explicitly dropped columns.
@@ -328,6 +369,7 @@ def prepare_data(
     # Load and preprocess data
     data = pd.read_csv(file_path)
     data = data.drop(columns=["Year", "Month", "Day", "Hour", "Year_Scaled", "Volume_MWh", "Diff"])
+
     # Drop only all-NaN rows
     data = data.dropna(how="all")
     data.ffill(inplace=True)
@@ -415,6 +457,11 @@ def prepare_data(
     train_targets = target_scaler.fit_transform(train_targets.reshape(-1, 1)).reshape(train_targets.shape)
     val_targets = target_scaler.transform(val_targets.reshape(-1, 1)).reshape(val_targets.shape)
     test_targets = target_scaler.transform(test_targets.reshape(-1, 1)).reshape(test_targets.shape)
+
+    # Apply PCA 
+    if pca:
+        pca_dict = perform_pca(dataframe=data, target_col="DA")
+        print(pca_dict)
 
     # Convert datasets to PyTorch tensors
     train_dense_past = torch.tensor(train_dense_past, dtype=torch.float32)
