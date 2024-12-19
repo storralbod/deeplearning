@@ -95,10 +95,14 @@ class LSTM_multivariate_input_multi_step_forecaster(nn.Module):
 ###########################################
 #       Tamas's experimental model
 ###########################################
+import torch
+import torch.nn as nn
+
 class SimpleLSTM(nn.Module):
     def __init__(self, 
                  past_input_size, 
                  future_input_size, 
+                 pca_input_size, 
                  hidden_size, 
                  num_layers, 
                  dropout, 
@@ -120,9 +124,17 @@ class SimpleLSTM(nn.Module):
             batch_first=True
         )
 
+        # MLP for PCA components
+        self.pca_embedding = nn.Sequential(
+            nn.Linear(pca_input_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size)
+        )
+
         # LSTM Decoder for future data
         self.decoder = nn.LSTM(
-            input_size=future_input_size,
+            input_size=future_input_size + hidden_size,  # Include PCA embeddings
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
@@ -151,20 +163,28 @@ class SimpleLSTM(nn.Module):
                 elif "bias" in name:
                     nn.init.zeros_(param.data)
 
-    def forward(self, x_past, x_future):
+    def forward(self, x_past, x_future, x_pca):
         """
         Forward pass for the model.
         Args:
         - x_past: Tensor of shape [batch_size, past_horizons, past_input_size]
         - x_future: Tensor of shape [batch_size, forecast_horizon, future_input_size]
+        - x_pca: Tensor of shape [batch_size, pca_input_size]
         Returns:
         - quantile_forecasts: Tensor of shape [batch_size, len(quantiles), forecast_horizon]
         """
         # Encode past data
         _, (hidden_state, _) = self.encoder(x_past)  # Use the hidden state from the encoder
 
+        # Process PCA components
+        pca_embedded = self.pca_embedding(x_pca)  # [batch_size, hidden_size]
+        pca_embedded = pca_embedded.unsqueeze(1).repeat(1, x_future.size(1), 1)  # [batch_size, forecast_horizon, hidden_size]
+
+        # Concatenate PCA embeddings with future inputs
+        x_future_combined = torch.cat([x_future, pca_embedded], dim=-1)  # [batch_size, forecast_horizon, future_input_size + hidden_size]
+
         # Decode future data, initialized with the encoder's hidden state
-        decoder_output, _ = self.decoder(x_future, (hidden_state, torch.zeros_like(hidden_state)))
+        decoder_output, _ = self.decoder(x_future_combined, (hidden_state, torch.zeros_like(hidden_state)))
 
         # Predict quantiles using separate output heads
         quantile_forecasts = []
@@ -196,7 +216,8 @@ class SpacedLSTM(nn.Module):
     def __init__(self, 
                  dense_input_size, 
                  spaced_input_size, 
-                 future_input_size, 
+                 future_input_size,
+                 pca_input_size, 
                  hidden_size, 
                  num_layers, 
                  dropout, 
@@ -239,9 +260,17 @@ class SpacedLSTM(nn.Module):
             bidirectional=True
         )
 
+        # PCA Embedding Layer
+        self.pca_embedding = nn.Sequential(
+            nn.Linear(pca_input_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size)
+        )
+
         # Fusion layer to combine encoder outputs
         self.fusion_layer = nn.Sequential(
-            nn.Linear(hidden_size * 2, hidden_size * 2),  # Combine both encoders' outputs
+            nn.Linear(hidden_size * 3, hidden_size * 2),  # Combine all three components
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_size * 2, hidden_size),  # Match decoder input size
@@ -285,13 +314,14 @@ class SpacedLSTM(nn.Module):
                     n = param.size(0)
                     param.data[n // 4 : n // 2] = 1.0  # Set forget gate bias to 1
 
-    def forward(self, x_dense, x_spaced, x_future):
+    def forward(self, x_dense, x_spaced, x_future, x_pca):
         """
         Forward pass for the model.
         Args:
         - x_dense: Tensor [batch_size, dense_horizons, dense_input_size]
         - x_spaced: Tensor [batch_size, spaced_horizons, spaced_input_size]
         - x_future: Tensor [batch_size, forecast_horizon, future_input_size]
+        - x_pca: Tensor [batch_size, pca_input_size]
         Returns:
         - quantile_forecasts: Tensor [batch_size, len(quantiles), forecast_horizon]
         """
@@ -303,8 +333,11 @@ class SpacedLSTM(nn.Module):
         # Encode spaced input
         _, (hidden_spaced, _) = self.encoder_spaced(x_spaced)  # hidden_spaced: [num_layers, batch_size, hidden_size]
 
-        # Combine last hidden states from both encoders
-        combined_hidden = torch.cat((hidden_dense[-1], hidden_spaced[-1]), dim=1)  # [batch_size, hidden_size * 2]
+        # Process PCA input
+        pca_embedded = self.pca_embedding(x_pca)  # [batch_size, hidden_size]
+
+        # Combine last hidden states from both encoders and PCA embedding
+        combined_hidden = torch.cat((hidden_dense[-1], hidden_spaced[-1], pca_embedded), dim=1)  # [batch_size, hidden_size * 3]
         combined_hidden = self.fusion_layer(combined_hidden)  # [batch_size, hidden_size]
 
         # Expand combined_hidden to match the decoder's required hidden size
@@ -326,5 +359,3 @@ class SpacedLSTM(nn.Module):
         quantile_forecasts = torch.stack(quantile_forecasts, dim=1)  # [batch_size, len(quantiles), forecast_horizon]
 
         return quantile_forecasts
-
-

@@ -177,9 +177,9 @@ def create_features(input_features, target, dense_lookback, spaced_lookback, for
         spaced_steps = None
 
     for i in range(len(input_features) - dense_lookback - (max(spaced_steps) if spaced_steps is not None else 0) - forecast_horizon):
+
         # Extract dense past features
         dense_past_features = input_features[i : i + dense_lookback]
-
         # Extract spaced past features if applicable
         if spaced_steps is not None:
             spaced_past_indices = i + dense_lookback - spaced_steps[::-1]  # Reverse for chronological order
@@ -216,6 +216,7 @@ def create_features(input_features, target, dense_lookback, spaced_lookback, for
 
 def create_datasets(
     features,
+    pca_inputs,
     target,
     dense_lookback,
     spaced_lookback,
@@ -241,6 +242,7 @@ def create_datasets(
     num_train = int(usable_hours * p_train)
     num_val = int(usable_hours * p_val)
     num_test = usable_hours - num_train - num_val
+    pca_inputs = pca_inputs[:usable_hours]
 
     if spaced_lookback > len(features) - dense_lookback - forecast_horizon:
         spaced_lookback = len(features) - dense_lookback - forecast_horizon
@@ -286,6 +288,9 @@ def create_datasets(
     val_targets = outputs[num_train : num_train + num_val]
     test_targets = outputs[num_train + num_val :]
 
+    train_pca = pca_inputs[:num_train]
+    val_pca = pca_inputs[num_train : num_train + num_val]
+    test_pca = pca_inputs[num_train + num_val :]
     return (
         train_dense,
         train_spaced,
@@ -299,10 +304,13 @@ def create_datasets(
         test_spaced,
         test_future,
         test_targets,
+        train_pca,
+        val_pca,
+        test_pca,
     )
 
 
-def perform_pca(dataframe, target_col=None, exclude_cols=None, variance_threshold=0.01):
+def perform_pca(dataframe, target_col=None, exclude_cols=None, exclude_scaler=None, variance_threshold=0.01):
 
     # Exclude target and other specified columns
     exclude_cols = exclude_cols or []
@@ -312,14 +320,14 @@ def perform_pca(dataframe, target_col=None, exclude_cols=None, variance_threshol
     
     # Convert to NumPy array
     feature_data = dataframe[feature_cols].to_numpy()
-
+    not_scaled = dataframe[exclude_scaler].to_numpy()
     # Scale data
     scaler = StandardScaler()
     scaled_data = scaler.fit_transform(feature_data)
-
+    pca_features = np.concatenate((scaled_data, not_scaled), axis=1)
     # Perform PCA
     pca_model = PCA()
-    pca_data = pca_model.fit_transform(scaled_data)
+    pca_data = pca_model.fit_transform(pca_features)
 
     # Explained variance
     explained_variance_ratio = pca_model.explained_variance_ratio_
@@ -349,7 +357,6 @@ def prepare_data(
     target_col,
     spaced=True,
     step_growth_factor=None,
-    pca=True
     ):
     """
     Prepare data for forked training with dense and spaced lookback.
@@ -368,7 +375,7 @@ def prepare_data(
     """
     # Load and preprocess data
     data = pd.read_csv(file_path)
-    data = data.drop(columns=["Year", "Month", "Day", "Hour", "Year_Scaled", "Volume_MWh", "Diff"])
+    data = data.drop(columns=["Year", "Month", "Day", "Hour", "Volume_MWh", "Diff"])
 
     # Drop only all-NaN rows
     data = data.dropna(how="all")
@@ -376,12 +383,16 @@ def prepare_data(
     data.bfill(inplace=True)
 
     # Identify columns to exclude from scaling
-    exclude_from_scaling = ["Hour_Sin", "Hour_Cos", "Day_Sin", "Day_Cos", "Month_Sin", "Month_Cos"]
+    exclude_from_scaling = ["Year_Scaled", "Hour_Sin", "Hour_Cos", "Day_Sin", "Day_Cos", "Month_Sin", "Month_Cos"]
     # Separate features and target
     output_data = np.array(data.loc[:, target_col]).reshape(-1, 1)
     future_indices = [data.columns.get_loc(col) for col in future_cols]
     feature_cols = [col for col in data.columns if col not in exclude_from_scaling and col != target_col]
-
+    pca_results = perform_pca(dataframe=data, target_col=target_col, exclude_cols=["ID"], exclude_scaler=exclude_from_scaling, variance_threshold=0.01)
+    pca_data = pca_results["pca_data"]
+    optimal_components = pca_results["optimal_components"]
+    # Select only the optimal components
+    pca_features = pca_data[:, :optimal_components]
     # Prepare datasets
     (
         train_dense_past,
@@ -396,8 +407,12 @@ def prepare_data(
         test_spaced_past,
         test_future,
         test_targets,
+        train_pca,
+        val_pca,
+        test_pca,
     ) = create_datasets(
         features=data.to_numpy(),
+        pca_inputs=pca_features,
         target=output_data,
         dense_lookback=dense_lookback,
         spaced_lookback=spaced_lookback,
@@ -459,11 +474,6 @@ def prepare_data(
     val_targets = target_scaler.transform(val_targets.reshape(-1, 1)).reshape(val_targets.shape)
     test_targets = target_scaler.transform(test_targets.reshape(-1, 1)).reshape(test_targets.shape)
 
-    # Apply PCA 
-    if pca:
-        pca_dict = perform_pca(dataframe=data, target_col="DA")
-        print(pca_dict)
-
     # Convert datasets to PyTorch tensors
     train_dense_past = torch.tensor(train_dense_past, dtype=torch.float32)
     val_dense_past = torch.tensor(val_dense_past, dtype=torch.float32)
@@ -474,6 +484,9 @@ def prepare_data(
     train_targets = torch.tensor(train_targets, dtype=torch.float32)
     val_targets = torch.tensor(val_targets, dtype=torch.float32)
     test_targets = torch.tensor(test_targets, dtype=torch.float32)
+    train_pca = torch.tensor(train_pca, dtype=torch.float32)
+    val_pca = torch.tensor(val_pca, dtype=torch.float32)
+    test_pca = torch.tensor(test_pca, dtype=torch.float32)
 
     if spaced:
         train_spaced_past = torch.tensor(train_spaced_past, dtype=torch.float32)
@@ -483,14 +496,17 @@ def prepare_data(
             train_dense_past,
             train_spaced_past,
             train_future,
+            train_pca,
             train_targets,
             val_dense_past,
             val_spaced_past,
             val_future,
+            val_pca,
             val_targets,
             test_dense_past,
             test_spaced_past,
             test_future,
+            test_pca,
             test_targets,
             target_scaler,
         )
@@ -498,12 +514,15 @@ def prepare_data(
         return (
             train_dense_past,
             train_future,
+            train_pca,
             train_targets,
             val_dense_past,
             val_future,
+            val_pca,
             val_targets,
             test_dense_past,
             test_future,
+            test_pca,
             test_targets,
             target_scaler,
         )

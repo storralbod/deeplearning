@@ -2,27 +2,57 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
-def quantile_loss(y, y_hat, quantiles):
+def quantile_loss(y, y_hat, quantiles, weights=[0.2, 0.6, 0.2], dominant_period=24, reg_weight=0.1):
     """
-    Compute quantile loss and enforce quantile ordering.
+    Compute weighted quantile loss with periodic regularization to enforce quantile ordering.
     Args:
         y (Tensor): Targets of shape [batch_size, forecast_horizon, 1].
         y_hat (Tensor): Predictions of shape [batch_size, len(quantiles), forecast_horizon].
         quantiles (list): List of quantiles.
+        weights (list or None): Weights for each quantile. If None, uniform weighting is applied.
+        dominant_period (int): The dominant period of the target in time steps.
+        reg_weight (float): Regularization weight for periodic alignment.
     Returns:
-        loss (Tensor): Scalar quantile loss.
+        loss (Tensor): Scalar weighted quantile loss.
     """
+    if weights is None:
+        weights = [1.0] * len(quantiles)
+
+    # Normalize weights to sum to 1 for stability
+    weights = torch.tensor(weights, device=y.device, dtype=y.dtype)
+    weights = weights / weights.sum()
+
     losses = []
 
     # Reshape targets to [batch_size, 1, forecast_horizon] for broadcasting
     y = y.permute(0, 2, 1)  # Change shape from [batch_size, forecast_horizon, 1] to [batch_size, 1, forecast_horizon]
 
-    for i, q in enumerate(quantiles):
+    # Compute FFT frequencies for the periodic regularization
+    forecast_horizon = y_hat.shape[-1]
+    freq_axis = torch.fft.rfftfreq(forecast_horizon, d=1.0).to(y.device)  # Frequency axis
+    target_freq_idx = (1.0 / dominant_period) / freq_axis[1]  # Convert period to frequency index
+
+    for i, (q, w) in enumerate(zip(quantiles, weights)):
         # Align dimensions and calculate errors
         errors = y - y_hat[:, i, :].unsqueeze(1)  # [batch_size, 1, forecast_horizon]
-        losses.append(torch.max(q * errors, (q - 1) * errors).mean())
+        quantile_loss = torch.max(q * errors, (q - 1) * errors).mean()
 
-    return torch.mean(torch.stack(losses))
+        # Perform FFT once for this quantile prediction
+        fft_result = torch.fft.rfft(y_hat[:, i, :], dim=-1)
+        amplitudes = torch.abs(fft_result)  # Amplitudes of frequency components
+
+        # Identify dominant frequency in the predictions
+        dominant_idx = torch.argmax(amplitudes, dim=-1)
+        
+        # Align prediction dominant frequency with target dominant frequency
+        reg_loss = reg_weight * torch.mean((dominant_idx - target_freq_idx) ** 2)
+
+        # Add periodic regularization to quantile loss
+        total_loss = quantile_loss + reg_loss
+        losses.append(w * total_loss)
+
+    return torch.sum(torch.stack(losses))
+
 
 def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon, device, spaced=False):
     """
@@ -48,17 +78,18 @@ def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon
         for batch in test_loader:
             # Separate inputs based on model type
             if spaced:
-                dense_inputs, spaced_inputs, future_inputs, targets = batch
-                dense_inputs, spaced_inputs, future_inputs = (
+                dense_inputs, spaced_inputs, future_inputs, pca_inputs, targets = batch
+                dense_inputs, spaced_inputs, future_inputs, pca_inputs = (
                     dense_inputs.to(device),
                     spaced_inputs.to(device),
                     future_inputs.to(device),
+                    pca_inputs.to(device),
                 )
-                preds = model(dense_inputs, spaced_inputs, future_inputs)
+                preds = model(dense_inputs, spaced_inputs, future_inputs, pca_inputs)
             else:
-                dense_inputs, future_inputs, targets = batch
-                dense_inputs, future_inputs = dense_inputs.to(device), future_inputs.to(device)
-                preds = model(dense_inputs, future_inputs)
+                dense_inputs, future_inputs, pca_inputs, targets = batch
+                dense_inputs, future_inputs, pca_inputs = dense_inputs.to(device), future_inputs.to(device), pca_inputs.to(device)
+                preds = model(dense_inputs, future_inputs, pca_inputs)
 
             forecasts.append(preds.cpu())
             true_values.append(targets)
