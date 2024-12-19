@@ -2,56 +2,58 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
-def quantile_loss(y, y_hat, quantiles, weights=[0.2, 0.6, 0.2], dominant_period=24, reg_weight=0.1):
+def quantile_loss_with_rmse(y, y_hat, quantiles, dense_lookback, reg_weight=0.1, rmse_weight=1.0, lambda_range=0.1):
     """
-    Compute weighted quantile loss with periodic regularization to enforce quantile ordering.
+    Compute quantile loss with RMSE for the middle quantile and periodic regularization.
     Args:
         y (Tensor): Targets of shape [batch_size, forecast_horizon, 1].
         y_hat (Tensor): Predictions of shape [batch_size, len(quantiles), forecast_horizon].
         quantiles (list): List of quantiles.
-        weights (list or None): Weights for each quantile. If None, uniform weighting is applied.
-        dominant_period (int): The dominant period of the target in time steps.
-        reg_weight (float): Regularization weight for periodic alignment.
+        dense_lookback (int): Length of dense lookback (for periodic regularization).
+        reg_weight (float): Weight for periodic regularization.
+        rmse_weight (float): Weight for RMSE term.
     Returns:
-        loss (Tensor): Scalar weighted quantile loss.
+        total_loss (Tensor): Combined loss (scalar).
+        rmse_middle (Tensor): RMSE for the middle quantile (scalar, for logging).
     """
-    if weights is None:
-        weights = [1.0] * len(quantiles)
-
-    # Normalize weights to sum to 1 for stability
-    weights = torch.tensor(weights, device=y.device, dtype=y.dtype)
-    weights = weights / weights.sum()
-
     losses = []
+    rmse_middle = None
 
     # Reshape targets to [batch_size, 1, forecast_horizon] for broadcasting
     y = y.permute(0, 2, 1)  # Change shape from [batch_size, forecast_horizon, 1] to [batch_size, 1, forecast_horizon]
 
-    # Compute FFT frequencies for the periodic regularization
-    forecast_horizon = y_hat.shape[-1]
-    freq_axis = torch.fft.rfftfreq(forecast_horizon, d=1.0).to(y.device)  # Frequency axis
-    target_freq_idx = (1.0 / dominant_period) / freq_axis[1]  # Convert period to frequency index
+    # Compute FFT frequencies for periodic regularization
+    freq_axis = torch.fft.rfftfreq(dense_lookback, d=1.0).to(y.device)
+    target_freq_idx = (1.0 / 24) / freq_axis[1]  # Target daily frequency
 
-    for i, (q, w) in enumerate(zip(quantiles, weights)):
-        # Align dimensions and calculate errors
-        errors = y - y_hat[:, i, :].unsqueeze(1)  # [batch_size, 1, forecast_horizon]
-        quantile_loss = torch.max(q * errors, (q - 1) * errors).mean()
+    for i, q in enumerate(quantiles):
+        # Compute quantile loss
+        errors = y - y_hat[:, i, :].unsqueeze(1)
+        if q == 0.5:
+            # Use RMSE for the middle quantile
+            rmse_middle = torch.sqrt(torch.mean((y.squeeze(1) - y_hat[:, i, :]) ** 2))
+            quantile_loss = rmse_middle * rmse_weight
+        else:
+            # Standard quantile loss for other quantiles
+            quantile_loss = torch.max(q * errors, (q - 1) * errors).mean()
 
-        # Perform FFT once for this quantile prediction
-        fft_result = torch.fft.rfft(y_hat[:, i, :], dim=-1)
-        amplitudes = torch.abs(fft_result)  # Amplitudes of frequency components
+        # Apply periodic regularization for dense lookback (optional)
+        if q == 0.5:  # Focus periodic regularization on the middle quantile
+            fft_result = torch.fft.rfft(y_hat[:, i, :dense_lookback], dim=-1)  # Dense lookback portion
+            amplitudes = torch.abs(fft_result)
+            dominant_idx = amplitudes.argmax(dim=-1)
+            reg_loss = reg_weight * torch.mean((dominant_idx - target_freq_idx) ** 2)
+            quantile_loss += reg_loss
 
-        # Identify dominant frequency in the predictions
-        dominant_idx = torch.argmax(amplitudes, dim=-1)
-        
-        # Align prediction dominant frequency with target dominant frequency
-        reg_loss = reg_weight * torch.mean((dominant_idx - target_freq_idx) ** 2)
+        losses.append(quantile_loss)
 
-        # Add periodic regularization to quantile loss
-        total_loss = quantile_loss + reg_loss
-        losses.append(w * total_loss)
+    quantile_range = y_hat[:, 2, :] - y_hat[:, 0, :]
+    target_range = y.max(dim=2).values - y.min(dim=2).values  # True range
+    range_penalty = lambda_range * ((quantile_range - target_range) ** 2).mean()
 
-    return torch.sum(torch.stack(losses))
+    total_loss = torch.sum(torch.stack(losses)) + range_penalty
+    #total_loss = torch.sum(torch.stack(losses))
+    return total_loss
 
 
 def predict_model(model, test_loader, target_scaler, quantiles, forecast_horizon, device, spaced=False):
@@ -156,3 +158,6 @@ def plot_forecasts(forecasts, true_values, quantiles, forecast_horizon):
     
     # Plot worst prediction
     plot_single_forecast(worst_idx, f"Worst Prediction (RMSE: {rmse[worst_idx]:.4f})")
+
+    # Print avergae RMSE
+    print(f"Average RMSE: {np.mean(rmse):.4f}")
