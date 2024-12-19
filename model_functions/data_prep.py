@@ -375,8 +375,14 @@ def prepare_data(
     """
     # Load and preprocess data
     data = pd.read_csv(file_path)
-    data = data.drop(columns=["Year", "Month", "Day", "Hour", "Volume_MWh", "Diff"])
+    data = data.drop(columns=["Year", "Month", "Day", "Hour", "Volume_MWh"])
 
+    potential_targets = ["DA", "ID", "Diff"]
+    if target_col not in potential_targets:
+        raise ValueError(f"Invalid target column: {target_col}. Must be one of {potential_targets}")
+    # Drop rest of the potential targets
+    potential_targets.remove(target_col)
+    data = data.drop(columns=potential_targets)
     # Drop only all-NaN rows
     data = data.dropna(how="all")
     data.ffill(inplace=True)
@@ -428,22 +434,6 @@ def prepare_data(
     # Initialize scalers for features
     scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in feature_cols}
 
-
-    print("train:", train_dense_past.shape)
-    print("test:", test_dense_past.shape)
-    print("val:", val_dense_past.shape)
-    print("train_targets:", train_targets.shape)
-    print("test_targets:", test_targets.shape)
-    print("val_targets:", val_targets.shape)
-    print("train_future:", train_future.shape)
-    print("test_future:", test_future.shape)
-    print("val_future:", val_future.shape)
-    if train_spaced_past is not None:
-        print("train_spaced_past:", train_spaced_past.shape)
-        print("test_spaced_past:", test_spaced_past.shape)
-        print("val_spaced_past:", val_spaced_past.shape)
-
-
     # Apply scaling
     for col in feature_cols:
         col_idx = data.columns.get_loc(col)
@@ -460,11 +450,16 @@ def prepare_data(
 
         # If spaced lookback exists, transform spaced past data
         if spaced:
-            past_scalers = {col: MinMaxScaler(feature_range=(0, 1)) for col in feature_cols}
-            flat_train_spaced = train_spaced_past[:, :, col_idx].flatten().reshape(-1, 1)
-            past_scalers[col].fit(flat_train_spaced)
+            # Concatenate dense past and spaced lookback training data
+            combined_train_data = np.concatenate([
+                train_dense_past[:, :, col_idx].flatten(),
+                train_spaced_past[:, :, col_idx].flatten()
+            ]).reshape(-1, 1)
+
+            # Fit scaler on the combined training data
+            scalers[col].fit(combined_train_data)
             for dataset in [train_spaced_past, val_spaced_past, test_spaced_past]:
-                dataset[:, :, col_idx] = past_scalers[col].transform(
+                dataset[:, :, col_idx] = scalers[col].transform(
                     dataset[:, :, col_idx].reshape(-1, 1)
                 ).reshape(dataset.shape[0], dataset.shape[1])
 
